@@ -217,15 +217,16 @@ private $givenUrl;
 
 ### 3.2 given_url 的写入时机与覆盖行为
 
-**⚠️ 重要修正**：`given_url` 并非永不修改！它会在**每次 `updateEntry` 调用时被覆盖**。
+**⚠️ 重要修正**：`given_url` 并非永不修改！它会在**每次 `updateEntry` 调用时被无条件覆盖**。
 
 ```php
 // src/Helper/ContentProxy.php:43-79
 public function updateEntry(Entry $entry, $url, array $content = [], $disableContentUpdate = false): void
 {
-    // ... Graby 抓取网页内容 ...
+    // ... Graby 抓取或跳过抓取的判断 ...
 
     // 第76行：无条件设置 given_url，每次调用都会覆盖！
+    // 注意：无论是否执行了抓取，这里都会执行！
     $entry->setGivenUrl($url);
 
     $this->stockEntry($entry, $content);
@@ -244,7 +245,7 @@ public function setGivenUrl($givenUrl)
 ```
 
 **特性**：
-- ✅ 每次 `updateEntry` 调用都会设置
+- ✅ 每次 `updateEntry` 调用都会设置（第76行，无条件执行）
 - ⚠️ **会被后续调用覆盖**，不是"永不修改"
 - ✅ 不受忽略规则影响
 - ✅ 可用于重复检查（`findByUrlAndUserId` 会同时检查 url 和 given_url）
@@ -291,27 +292,62 @@ $this->contentProxy->updateEntry($entry, $entry->getUrl());
 - **given_url 结果**：⚠️ **被覆盖为当前的最终 URL**，丢失原始的 given_url
 
 #### 入口4：API POST 单条创建
+
+**⚠️ 重要发现：无论条目是否已存在，都会调用 updateEntry！**
+
 ```php
-// src/Controller/Api/EntryRestController.php:733-743
+// src/Controller/Api/EntryRestController.php:726-754
+$url = $request->request->get('url');
+
+$entry = $entryRepository->findByUrlAndUserId(
+    $url,
+    $this->getUser()->getId()
+);
+
 if (false === $entry) {
     $entry = new Entry($this->getUser());
-    $entry->setUrl($url);  // $url = request->request->get('url')
+    $entry->setUrl($url);
 }
-$contentProxy->updateEntry($entry, $entry->getUrl(), [...]);
+
+// ⚠️ 注意：这里在 if 块之外！无论条目是否已存在，都会执行！
+$contentProxy->updateEntry(
+    $entry,
+    $entry->getUrl(),  // ⚠️ 如果条目已存在，这里是已保存的最终 URL，不是用户传入的原始 URL！
+    [...]
+);
 ```
-- **传递的 `$url`**：`$entry->getUrl()` = API 请求参数中的 url
+
+**分支 A：条目不存在（新创建）**
+- **传递的 `$url`**：`$entry->getUrl()` = API 请求参数中的 url（用户传入的原始 URL）
 - **given_url 结果**：✅ 设置为 API 传入的 URL
 
+**分支 B：条目已存在**
+- **传递的 `$url`**：`$entry->getUrl()` = **数据库中已保存的最终 URL**
+- **given_url 结果**：⚠️ **被覆盖为已保存的最终 URL**，如果之前 given_url 是原始值则会丢失
+
 #### 入口5：API POST 批量创建
+
+**⚠️ 与单条创建不同：只有条目不存在时才调用 updateEntry！**
+
 ```php
-// src/Controller/Api/EntryRestController.php:560-563
-if (false === $entry) {
-    $entry = new Entry($this->getUser());
-    $contentProxy->updateEntry($entry, $url);  // $url = 批量列表中的当前 URL
+// src/Controller/Api/EntryRestController.php:552-564
+foreach ($urls as $key => $url) {
+    $entry = $entryRepository->findByUrlAndUserId(
+        $url,
+        $this->getUser()->getId()
+    );
+
+    // ⚠️ 注意：这里在 if 块之内！只有条目不存在时才执行！
+    if (false === $entry) {
+        $entry = new Entry($this->getUser());
+        $contentProxy->updateEntry($entry, $url);
+    }
+    // 条目已存在时：不调用 updateEntry，given_url 保持不变
 }
 ```
-- **传递的 `$url`**：批量列表中的当前 URL
-- **given_url 结果**：✅ 设置为批量列表中的 URL
+
+- **条目不存在时**：✅ `given_url` 设置为批量列表中的 URL
+- **条目已存在时**：❌ 不调用 `updateEntry`，`given_url` 保持数据库中的原值
 
 #### 入口6：API PATCH 更新内容（已有 Entry）
 ```php
@@ -344,15 +380,84 @@ $contentProxy->updateEntry($entry, $entry->getUrl());
 | Web 创建（新） | ✅ 是 | 用户提交的原始 URL | 用户提交的原始 URL | ❌ 首次设置 |
 | Bookmarklet 创建（新） | ✅ 是 | Bookmarklet 传入的 URL | Bookmarklet 传入的 URL | ❌ 首次设置 |
 | Web 重抓（已有） | ✅ 是 | 当前的最终 URL | 当前的最终 URL | ✅ 是，丢失原始值 |
-| API POST 创建（新） | ✅ 是 | API 传入的 URL | API 传入的 URL | ❌ 首次设置 |
-| API POST 创建（已存在） | ❌ 否 | - | 保持原值 | ❌ 否 |
+| **API POST 单条（新）** | ✅ 是 | API 传入的原始 URL | API 传入的 URL | ❌ 首次设置 |
+| **API POST 单条（已存在）** | ✅ 是 | **已保存的最终 URL** | 已保存的最终 URL | ✅ 是，可能丢失原始值 |
+| **API POST 批量（新）** | ✅ 是 | 批量列表中的 URL | 批量列表中的 URL | ❌ 首次设置 |
+| **API POST 批量（已存在）** | ❌ 否 | - | 保持数据库原值 | ❌ 否 |
 | API PATCH（无 content） | ❌ 否 | - | 保持原值 | ❌ 否 |
 | API PATCH（有 content） | ✅ 是 | 当前的最终 URL | 当前的最终 URL | ✅ 是，丢失原始值 |
 | API PATCH 重抓 | ✅ 是 | 当前的最终 URL | 当前的最终 URL | ✅ 是，丢失原始值 |
 
-> **关键结论**：对已有 Entry 执行**重新抓取**或**PATCH 更新内容**时，`given_url` 会被覆盖为当前的最终 URL，丢失用户最初提交的 URL。这是代码的实际行为，与字段注释中的"the url entered by the user"不完全一致。
+> **关键结论 1**：API POST 单条创建和批量创建的逻辑不同！单条创建无论是否已存在都会调用 updateEntry，批量创建只有不存在时才调用。
+>
+> **关键结论 2**：对已有 Entry 执行**重新抓取**、**API POST 单条（已存在）**或**PATCH 更新内容**时，`given_url` 会被覆盖为当前的最终 URL，丢失用户最初提交的 URL。这是代码的实际行为，与字段注释中的"the url entered by the user"不完全一致。
 
-### 3.5 origin_url 的设置条件
+### 3.5 updateEntry 抓取被跳过的场景分支
+
+`updateEntry` 中调用 Graby 抓取是有条件的，满足以下任一条件时会**跳过抓取**：
+
+```php
+// src/Helper/ContentProxy.php:50
+if ((empty($content) || false === $this->validateContent($content)) && false === $disableContentUpdate) {
+    // 执行抓取：调用 $this->graby->fetchContent($url)
+} else {
+    // 跳过抓取：使用传入的 $content
+}
+```
+
+**跳过抓取的条件**（满足任一即可）：
+1. `!empty($content) && $this->validateContent($content)` = 传入了完整内容（有 title、html、url）
+2. `$disableContentUpdate === true` = 明确禁用内容更新
+
+**内容验证逻辑**：
+```php
+// src/Helper/ContentProxy.php:400-403
+private function validateContent(array $content)
+{
+    return !empty($content['title']) && !empty($content['html']) && !empty($content['url']);
+}
+```
+
+**⚠️ 重要：即使跳过抓取，仍然会执行以下操作**：
+```php
+// 无论是否跳过抓取，以下代码始终执行：
+$content['url'] = !empty($content['url']) ? $content['url'] : $url;  // 第67行
+if (empty($entry->getUrl()) && !empty($url)) {  // 第72-74行
+    $entry->setUrl($url);
+}
+$entry->setGivenUrl($url);  // 第76行 ⚠️ 始终覆盖 given_url！
+$this->stockEntry($entry, $content);  // 第78行 ⚠️ 始终调用 stockEntry！
+```
+
+**stockEntry 中的规则检查**：
+```php
+// src/Helper/ContentProxy.php:243-245
+private function stockEntry(Entry $entry, array $content): void
+{
+    $this->updateOriginUrl($entry, $content['url']);  // ⚠️ 规则检查仍然执行！
+    // ...
+}
+```
+
+**跳过抓取场景的完整执行链**：
+```
+ContentProxy::updateEntry($entry, $url, $content, true)
+    │
+    ├─ 跳过 Graby 抓取（使用传入的 $content）
+    │
+    ├─ $entry->setGivenUrl($url)  ← 仍然覆盖 given_url！
+    │
+    └─ stockEntry($entry, $content)
+        └─ updateOriginUrl($entry, $content['url'])
+            └─ 【规则检查点】仍然会执行！
+```
+
+**场景示例：API PATCH 带 content 参数**
+- `disableContentUpdate = true` → 跳过抓取
+- 但 `setGivenUrl($entry->getUrl())` 仍然执行 → given_url 被覆盖
+- 且 `stockEntry` → `updateOriginUrl` 仍然执行 → 规则检查仍然生效（如果 `$content['url']` 与 `$entry->getUrl()` 不同）
+
+### 3.6 origin_url 的设置条件
 
 `origin_url` 只有在以下全部条件满足时才会被自动设置：
 
@@ -371,19 +476,47 @@ default:
     break;
 ```
 
-### 3.6 origin_url 与 given_url 的边界对照
+### 3.7 规则命中后 origin_url 的保留边界
+
+**规则命中时的代码行为**：
+```php
+// src/Helper/ContentProxy.php:356-360
+if ($this->ignoreOriginProcessor->process($entry)) {
+    $entry->setUrl($url);  // 只更新 url
+    return false;  // 提前返回，跳过后续逻辑
+}
+```
+
+**关键边界分析**：
+
+| 场景 | 规则匹配前 origin_url 状态 | 规则匹配后 origin_url 状态 | 说明 |
+|------|--------------------------|--------------------------|------|
+| 1 | `null`（空） | `null`（空） | ✅ 符合预期：不设置 origin_url |
+| 2 | 已有值（如之前设置过） | **保持原值不变** | ⚠️ 重要：规则匹配不会清空已有的 origin_url！ |
+| 3 | 已有值 + API 传入新值 | API 传入的值 | API 覆盖优先级最高 |
+
+> **边界结论**：忽略规则的作用是**"阻止设置新的 origin_url"**，而不是**"清除已有的 origin_url"**。如果 origin_url 之前已经有值，规则匹配后会保持不变。
+
+**典型场景**：
+1. 第一次创建时规则不匹配 → 设置了 origin_url
+2. 后来添加了规则
+3. 重新抓取时规则匹配 → url 会更新，但 origin_url 仍然保留第一次的值！
+
+### 3.8 origin_url 与 given_url 的边界对照
 
 | 维度 | `origin_url` | `given_url` |
 |------|-------------|-------------|
 | **设计目的** | 记录"从哪里发现这个链接"（如 RSS 源、Twitter、其他文章） | 记录"用户输入的原始 URL" |
-| **设置时机** | URL 重定向且规则不匹配时 | 每次 `updateEntry` 调用时 |
-| **可被规则抑制** | ✅ 是（匹配规则时不设置） | ❌ 否（总是设置） |
+| **设置时机** | URL 重定向且规则不匹配时 | 每次 `updateEntry` 调用时（无条件） |
+| **可被规则抑制** | ✅ 是（匹配规则时不设置新值） | ❌ 否（总是设置） |
+| **规则匹配后已有值** | ⚠️ 保持不变（不清除） | ⚠️ 仍会被覆盖 |
 | **可被 API 覆盖** | ✅ 是（POST/PATCH 都支持 `origin_url` 参数） | ❌ 否（API 无 `given_url` 参数） |
-| **重抓时是否变化** | 不变（如果已设置且不为空） | ⚠️ 会被覆盖为当前的最终 URL |
+| **重抓时是否变化** | 不变（如已设置且不为空） | ⚠️ 会被覆盖为当前的最终 URL |
 | **空值含义** | 没有发生重定向，或规则匹配，或 API 未设置 | 从未调用过 `updateEntry`（极少见） |
 | **用于去重检查** | ❌ 否 | ✅ 是（`findByUrlAndUserId` 同时检查 url 和 given_url） |
+| **抓取被跳过时** | 仍可能变化（如果 `$content['url']` 不同） | ⚠️ 仍会被覆盖 |
 
-### 3.7 三个 URL 的完整生命周期（以重抓为例）
+### 3.9 三个 URL 的完整生命周期（以重抓为例）
 
 ```
 【初次创建】
@@ -424,7 +557,7 @@ default:
         └─ 最终状态：
             ├─ url = https://example.com/article
             ├─ given_url = https://example.com/article  ← 丢失原始值！
-            └─ origin_url = 保持不变
+            └─ origin_url = 保持不变（如果之前有值的话）
 ```
 
 ---
@@ -513,23 +646,22 @@ if (!empty($data['origin_url'])) {
 EntryController::updateEntry()  [src/Controller/EntryController.php:703]
     ↓
 ContentProxy::updateEntry()     [src/Helper/ContentProxy.php:43]
-    ├─ 步骤1：Graby 抓取网页内容
-    │   $this->graby->fetchContent($url)
+    ├─ 步骤1：判断是否需要抓取
+    │   ├─ 是 → Graby 抓取网页内容
+    │   └─ 否 → 跳过抓取，使用传入的 content
     │
-    ├─ 步骤2：设置 given_url（第76行，每次调用都覆盖！）
+    ├─ 步骤2：设置 given_url（第76行，每次调用都覆盖！无论是否抓取）
     │   $entry->setGivenUrl($url)
     │
     └─ 步骤3：存储抓取结果
         ↓
         ContentProxy::stockEntry()  [src/Helper/ContentProxy.php:243]
+            ├─ 【规则生效点】updateOriginUrl() 检查 URL 变化
+            │   ├─ 检查 URL 是否变化
+            │   ├─ 调用 ignoreOriginProcessor->process()
+            │   └─ 根据规则匹配结果决定是否设置 origin_url
             ├─ 设置标题、内容、阅读时间等
-            ├─ 自动标签
-            └─ 更新 URL
-                ↓
-                ContentProxy::updateOriginUrl()  [src/Helper/ContentProxy.php:328]
-                    ├─ 【规则生效点】检查 URL 是否变化
-                    ├─ 【规则生效点】调用 ignoreOriginProcessor->process()
-                    └─ 根据规则匹配结果决定是否设置 origin_url
+            └─ 自动标签
 ```
 
 ---
@@ -561,6 +693,7 @@ private function updateOriginUrl(Entry $entry, $url)
     // 调用规则处理器检查是否匹配忽略规则
     if ($this->ignoreOriginProcessor->process($entry)) {
         // 规则匹配：直接更新 URL，不设置 origin_url
+        // ⚠️ 注意：如果 origin_url 已有值，不会被清除！
         $entry->setUrl($url);
         return false;  // 提前返回，跳过后续逻辑
     }
@@ -609,7 +742,8 @@ private function updateOriginUrl(Entry $entry, $url)
 | 行为 | 说明 |
 |------|------|
 | `$entry->setUrl($url)` | 直接更新为最终抓取到的 URL |
-| 不设置 `origin_url` | 原始 URL 被丢弃，不记录来源 |
+| 不设置新的 `origin_url` | 原始 URL 不被记录为新的来源 |
+| ⚠️ 不清除已有的 `origin_url` | 如果之前已有值，保持不变 |
 | 跳过 URL 差异分析 | 直接 `return false`，不进入后续 switch 逻辑 |
 | 记录日志 | `info` 级别日志记录匹配的规则 |
 
@@ -738,7 +872,7 @@ private function setupConfig()
 5. Graby 抓取，跟随重定向到 `https://example.com/article`
 6. `stockEntry()` → `updateOriginUrl($entry, 'https://example.com/article')`
 7. 规则检查：`host = "feedproxy.google.com"` 匹配成功
-8. 执行 `$entry->setUrl('https://example.com/article')`，不设置 origin_url
+8. 执行 `$entry->setUrl('https://example.com/article')`，origin_url 保持 null
 9. 最终状态：
    - `url` = `https://example.com/article`
    - `given_url` = `http://feedproxy.google.com/example`
@@ -780,7 +914,42 @@ private function setupConfig()
    - `given_url` = `https://example.com/article` ← 丢失了原始值！
    - `origin_url` = `null`（保持不变）
 
-### 7.4 场景4：API 手动设置 origin_url 覆盖规则
+### 7.4 场景4：API POST 单条创建命中已存在条目，given_url 被覆盖
+
+**调用路径**：API POST 单条创建（条目已存在）
+
+1. 数据库中已有 Entry：
+   - `url` = `https://example.com/article`
+   - `given_url` = `http://feedproxy.google.com/example`（原始值）
+   - `origin_url` = `null`
+2. POST 请求 `/api/entries.json`，参数 `url=http://feedproxy.google.com/example`
+3. `EntryRestController::postEntriesAction()` 执行 `findByUrlAndUserId`，找到已存在的 Entry
+4. ⚠️ 注意：不会进入 `if (false === $entry)` 块，`$entry->getUrl()` 仍然是数据库中的 `https://example.com/article`
+5. 调用 `$contentProxy->updateEntry($entry, 'https://example.com/article', ...)`
+6. 第76行：`$entry->setGivenUrl('https://example.com/article')` ← **被覆盖！丢失原始值**
+7. 最终状态：
+   - `url` = `https://example.com/article`
+   - `given_url` = `https://example.com/article` ← 被覆盖为最终 URL
+   - `origin_url` = `null`（保持不变）
+
+### 7.5 场景5：API POST 批量创建命中已存在条目，given_url 保持不变
+
+**调用路径**：API POST 批量创建（条目已存在）
+
+1. 数据库中已有 Entry：
+   - `url` = `https://example.com/article`
+   - `given_url` = `http://feedproxy.google.com/example`（原始值）
+   - `origin_url` = `null`
+2. POST 请求 `/api/entries/multiple.json`，参数 `urls=["http://feedproxy.google.com/example"]`
+3. `EntryRestController::postEntriesListAction()` 执行 `findByUrlAndUserId`，找到已存在的 Entry
+4. ⚠️ 注意：跳过了 `if (false === $entry)` 块，**不调用** `updateEntry`！
+5. 直接持久化 Entry，given_url 保持不变
+6. 最终状态：
+   - `url` = `https://example.com/article`
+   - `given_url` = `http://feedproxy.google.com/example` ← 保持原始值不变
+   - `origin_url` = `null`（保持不变）
+
+### 7.6 场景6：API 手动设置 origin_url 覆盖规则
 
 **调用路径**：API POST 创建，带 origin_url 参数
 
@@ -802,7 +971,7 @@ private function setupConfig()
    - `given_url` = `http://feedproxy.google.com/example`
    - `origin_url` = `http://twitter.com/user/status/123` ← API 参数优先
 
-### 7.5 场景5：API PATCH 独立设置 origin_url（不触发抓取）
+### 7.7 场景7：API PATCH 独立设置 origin_url（不触发抓取）
 
 **调用路径**：API PATCH 更新，仅修改 origin_url
 
@@ -822,7 +991,7 @@ private function setupConfig()
    - `given_url` = 保持不变
    - `origin_url` = `http://custom-source.com` ← 直接设置，绕过所有规则
 
-### 7.6 场景6：API PATCH 更新内容，given_url 被覆盖
+### 7.8 场景8：API PATCH 更新内容，抓取被跳过但 given_url 仍被覆盖
 
 **调用路径**：API PATCH 更新，带 content 参数
 
@@ -835,14 +1004,41 @@ private function setupConfig()
        $entry,
        $entry->getUrl(),  // 当前的最终 URL
        ['html' => $data['content']],
-       true
+       true  // disableContentUpdate = true ← 跳过抓取！
    );
    ```
-4. 第76行：`$entry->setGivenUrl($entry->getUrl())` ← 被覆盖为当前的最终 URL
-5. 最终状态：
+4. 跳过 Graby 抓取，使用传入的 content
+5. 第76行：`$entry->setGivenUrl($entry->getUrl())` ← 仍然被覆盖为当前的最终 URL
+6. `stockEntry()` → `updateOriginUrl()` 检查：`$content['url']` 与 `$entry->getUrl()` 相同，不设置 origin_url
+7. 最终状态：
    - `url` = 保持不变
    - `given_url` = 被覆盖为当前的 url ← 丢失原始值
    - `origin_url` = 保持不变
+
+### 7.9 场景9：规则匹配后已有 origin_url 保持不变
+
+**调用路径**：先不匹配规则创建，后添加规则再重抓
+
+1. **阶段1：初始创建（无规则）**
+   - 创建 Entry: `http://othersite.com/link` → 重定向到 `https://example.com/article`
+   - 无规则匹配 → 设置 `origin_url = http://othersite.com/link`
+   - 状态：`url=最终, given_url=原始, origin_url=http://othersite.com/link`
+
+2. **阶段2：添加规则**
+   - 添加规则：`host = "othersite.com"`
+
+3. **阶段3：重新抓取**
+   - 调用 `updateEntry($entry, 'https://example.com/article')`
+   - `updateOriginUrl()` 检查 URL 无变化，直接返回
+   - ⚠️ 注意：规则检查根本没有执行（因为 URL 未变化）
+   - 最终状态：`origin_url` 仍然保持 `http://othersite.com/link`
+
+4. **阶段4：换一个 URL 重新创建（触发规则）**
+   - 创建 Entry: `http://othersite.com/another` → 重定向到 `https://example.com/another`
+   - 规则匹配成功 → 不设置 origin_url
+   - 状态：`origin_url = null`
+
+> **说明**：规则只在 URL 发生变化时才会被检查。已有 Entry 的 origin_url 不会因为后来添加了规则而被清除。
 
 ---
 
@@ -861,18 +1057,21 @@ private function setupConfig()
 └─────────────┬───────────┘
               │
               ▼
-┌──────────────────────────────────────┐
-│ ContentProxy::updateEntry            │
-│  1. Graby 抓取网页                   │
-│  2. setGivenUrl($url) ← 每次都设置！ │
-│  3. 获取最终 URL                     │
-└─────────────┬────────────────────────┘
+┌────────────────────────────────────────┐
+│ ContentProxy::updateEntry              │
+│  1. 判断是否需要 Graby 抓取             │
+│     ├─ 是 → 执行抓取                    │
+│     └─ 否 → 跳过抓取                    │
+│  2. setGivenUrl($url) ← 始终执行！     │
+│  3. 获取最终 URL（来自抓取或 content）  │
+└─────────────┬──────────────────────────┘
               │
               ▼
 ┌─────────────────────────┐
 │ ContentProxy::stockEntry │
-│  - 设置标题、内容等      │
-│  - 调用 updateOriginUrl  │
+│  ├─ 【规则生效点】updateOriginUrl()    │
+│  ├─ 设置标题、内容、阅读时间等         │
+│  └─ 自动标签                           │
 └─────────────┬───────────┘
               │
               ▼
@@ -930,8 +1129,12 @@ $rules = array_merge(
 | 规则处理器 | `src/Helper/RuleBasedIgnoreOriginProcessor.php` | 24-45 |
 | 规则生效点 | `src/Helper/ContentProxy.php` | 356-360 |
 | URL 更新逻辑 | `src/Helper/ContentProxy.php` | 328-393 |
-| given_url 设置（每次都覆盖） | `src/Helper/ContentProxy.php` | 76 |
+| given_url 设置（无条件覆盖） | `src/Helper/ContentProxy.php` | 76 |
+| 抓取跳过判断逻辑 | `src/Helper/ContentProxy.php` | 50-63 |
+| 内容验证逻辑 | `src/Helper/ContentProxy.php` | 400-403 |
 | setGivenUrl 内部实现 | `src/Entity/Entry.php` | 903-908 |
+| API POST 单条创建（无论是否存在都调用） | `src/Controller/Api/EntryRestController.php` | 726-754 |
+| API POST 批量创建（仅不存在时调用） | `src/Controller/Api/EntryRestController.php` | 552-564 |
 | API POST origin_url 覆盖 | `src/Controller/Api/EntryRestController.php` | 774-776 |
 | API PATCH origin_url 覆盖 | `src/Controller/Api/EntryRestController.php` | 1006-1008 |
 | API PATCH content 触发 updateEntry | `src/Controller/Api/EntryRestController.php` | 947-956 |
@@ -976,28 +1179,66 @@ $rules = array_merge(
 
 | 维度 | `url` | `given_url` | `origin_url` |
 |------|-------|-------------|-------------|
-| 可被规则影响 | ✅ 是（更新为最终 URL） | ❌ 否 | ✅ 是（可被抑制） |
+| 可被规则影响 | ✅ 是（更新为最终 URL） | ❌ 否 | ✅ 是（可被抑制设置新值） |
 | 可被 API 覆盖 | ❌ 否 | ❌ 否（无参数） | ✅ 是（POST/PATCH） |
 | 重抓时是否变化 | ✅ 是（可能更新） | ⚠️ 是（被覆盖为当前 url） | ❌ 否（如已设置） |
 | 用于去重检查 | ✅ 是 | ✅ 是 | ❌ 否 |
 | 设计含义 | 最终访问地址 | 用户输入的 URL | 来源发现地址 |
 | 实际行为 | 符合设计 | ⚠️ 重抓时会丢失原始值 | 符合设计 |
+| 抓取被跳过时 | 可能变化 | ⚠️ 仍会被覆盖 | 可能变化 |
 
 ### 11.3 given_url 的覆盖边界
 
-> ⚠️ **`given_url` 会在每次 `updateEntry` 调用时被覆盖**，对已有 Entry 执行重新抓取或 PATCH 更新内容时，会丢失用户最初提交的 URL。
+> ⚠️ **`given_url` 会在每次 `updateEntry` 调用时被无条件覆盖**，无论是否执行了抓取。
 
 **不会覆盖的场景**：
 - 首次创建 Entry
-- API POST 创建已存在的 Entry（不调用 updateEntry）
+- API POST 批量创建已存在的 Entry（不调用 updateEntry）
 - API PATCH 不包含 content 参数
 - 仅更新归档、星标、标签等元数据
 
 **会覆盖的场景**：
 - 重新抓取（Web 或 API）
+- API POST 单条创建（无论条目是否已存在）
 - API PATCH 包含 content 参数
 
-### 11.4 API 手动写入的边界
+### 11.4 API POST 单条 vs 批量的差异
+
+| 行为 | API POST 单条 | API POST 批量 |
+|------|-------------|-------------|
+| 条目已存在时是否调用 updateEntry | ✅ 是 | ❌ 否 |
+| 条目已存在时 given_url 是否变化 | ⚠️ 被覆盖为最终 URL | ❌ 保持不变 |
+| 条目已存在时是否重新抓取 | ✅ 是（如果需要） | ❌ 否 |
+
+> ⚠️ **重要差异**：API POST 单条创建和批量创建对已存在条目的处理逻辑不同！单条创建会重新执行 updateEntry，批量创建不会。
+
+### 11.5 抓取被跳过的场景边界
+
+> ⚠️ **即使跳过了 Graby 抓取，`setGivenUrl` 和 `stockEntry` 仍然会执行**！
+
+**跳过抓取的条件**：
+1. 传入了完整的 content（有 title、html、url）
+2. 或 `disableContentUpdate = true`
+
+**跳过抓取但仍执行的操作**：
+1. `$entry->setGivenUrl($url)` → given_url 仍会被覆盖
+2. `$this->stockEntry($entry, $content)` → 仍会调用 stockEntry
+3. `updateOriginUrl($entry, $content['url'])` → 规则检查仍可能执行（如果 URL 变化）
+
+### 11.6 规则命中后 origin_url 的保留边界
+
+> ⚠️ **规则匹配只会阻止设置新的 origin_url，不会清除已有的值**。
+
+| 场景 | 规则匹配前 origin_url | 规则匹配后 origin_url |
+|------|---------------------|---------------------|
+| 首次创建，规则匹配 | null | null |
+| 首次创建，规则不匹配 | null | 原始 URL |
+| 已有值，规则匹配 | 已有值 | **保持原值** |
+| API 传入新值 | 任意值 | API 传入的值 |
+
+> 规则的作用是"不记录新的来源"，而不是"清除已有的来源记录"。
+
+### 11.7 API 手动写入的边界
 
 > ⚠️ **API 手动传入的 `origin_url` 优先级最高**，会覆盖规则检查结果。
 
@@ -1008,7 +1249,7 @@ $rules = array_merge(
 - 第三方应用自定义来源记录
 - 但也意味着 API 调用可以完全绕过规则
 
-### 11.5 默认规则的落地边界
+### 11.8 默认规则的落地边界
 
 > ⚠️ **默认规则仅在安装时初始化**，重新安装会覆盖手动修改的实例级规则。
 
@@ -1023,17 +1264,21 @@ $rules = array_merge(
 
 忽略来源规则的核心作用是**控制 URL 重定向时是否保留原始来源信息**。其生效时机和边界非常精确：
 
-> **在抓取完成后、存储 Entry 时，当且仅当 URL 发生变化时，在 `updateOriginUrl()` 方法中，针对重定向之前的原始 URL 检查规则。如果匹配，则直接更新 URL，不记录 `origin_url`。**
+> **在抓取完成后、存储 Entry 时，当且仅当 URL 发生变化时，在 `updateOriginUrl()` 方法中，针对重定向之前的原始 URL 检查规则。如果匹配，则直接更新 URL，不记录新的 origin_url（但保留已有的 origin_url）。**
 
 ### 关键修正与澄清
 
-1. **`given_url` 并非永不修改**：它会在每次 `updateEntry` 调用时被覆盖，重抓或 PATCH 更新内容时会丢失原始值。
+1. **`given_url` 并非永不修改**：它会在每次 `updateEntry` 调用时被**无条件覆盖**，重抓、API POST 单条（已存在）或 PATCH 更新内容时都会丢失原始值。
 
-2. **API PATCH 可以独立设置 `origin_url`**：不需要触发抓取，也不经过规则检查，直接覆盖。
+2. **API POST 单条 vs 批量逻辑不同**：单条创建无论条目是否已存在都会调用 updateEntry，批量创建只有不存在时才调用。
 
-3. **规则匹配的基准是原始 URL**：针对来源域名（如 RSS 订阅源）配置规则，而不是最终目标域名。
+3. **抓取被跳过但 given_url 仍被覆盖**：即使跳过了 Graby 抓取，`setGivenUrl` 和 `stockEntry` 仍然会执行。
 
-4. **三个 URL 的职责分工**：
+4. **规则不会清除已有的 origin_url**：规则只阻止设置新值，已有值保持不变。
+
+5. **API PATCH 可以独立设置 origin_url**：不需要触发抓取，也不经过规则检查，直接覆盖。
+
+6. **三个 URL 的职责分工**：
    - `url`：最终访问地址，多次更新
    - `given_url`：本次调用传入的 URL，每次调用覆盖
    - `origin_url`：来源发现地址，可被规则抑制或 API 覆盖
