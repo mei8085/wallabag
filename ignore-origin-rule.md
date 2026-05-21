@@ -502,7 +502,164 @@ if ($this->ignoreOriginProcessor->process($entry)) {
 2. 后来添加了规则
 3. 重新抓取时规则匹配 → url 会更新，但 origin_url 仍然保留第一次的值！
 
-### 3.8 origin_url 与 given_url 的边界对照
+### 3.8 查重机制与 given_url 覆盖的影响
+
+#### findByUrlAndUserId 的双重哈希检查
+
+`EntryRepository::findByUrlAndUserId()` 使用双重哈希机制进行查重，同时检查 `hashedUrl` 和 `hashedGivenUrl`：
+
+```php
+// src/Repository/EntryRepository.php:502-508
+public function findByUrlAndUserId($url, $userId)
+{
+    return $this->findByHashedUrlAndUserId(
+        UrlHasher::hashUrl($url),
+        $userId
+    );
+}
+
+// src/Repository/EntryRepository.php:535-560
+public function findByHashedUrlAndUserId($hashedUrl, $userId)
+{
+    // 第一步：用 hashed_url 匹配
+    $res = $this->createQueryBuilder('e')
+        ->where('e.hashedUrl = :hashed_url')
+        ->andWhere('e.user = :user_id')
+        ->getQuery()
+        ->getResult();
+
+    if (\count($res)) {
+        return current($res);
+    }
+
+    // 第二步：用 hashed_given_url 匹配
+    $res = $this->createQueryBuilder('e')
+        ->where('e.hashedGivenUrl = :hashed_given_url')
+        ->andWhere('e.user = :user_id')
+        ->getQuery()
+        ->getResult();
+
+    if (\count($res)) {
+        return current($res);
+    }
+
+    return false;
+}
+```
+
+**查重逻辑**：
+1. 先对传入的 URL 计算哈希值
+2. 先在 `hashed_url` 列中查找（匹配最终 URL）
+3. 如果没找到，再在 `hashed_given_url` 列中查找（匹配用户输入的 URL）
+4. 只要任一匹配，就认为条目已存在
+
+#### hashedUrl 与 hashedGivenUrl 的同步机制
+
+Entry 实体在设置 URL 时会自动更新对应的哈希值：
+
+```php
+// src/Entity/Entry.php:296-301
+public function setUrl($url)
+{
+    $this->url = $url;
+    $this->hashedUrl = UrlHasher::hashUrl($url);  // 自动更新 hashedUrl
+    return $this;
+}
+
+// src/Entity/Entry.php:903-908
+public function setGivenUrl($givenUrl)
+{
+    $this->givenUrl = $givenUrl;
+    $this->hashedGivenUrl = UrlHasher::hashUrl($givenUrl);  // 自动更新 hashedGivenUrl
+    return $this;
+}
+```
+
+#### given_url 被覆盖对查重命中的影响
+
+**场景分析**：假设 Entry 初始状态为：
+- `url` = `https://example.com/article`（最终 URL）
+- `given_url` = `http://feedproxy.google.com/example`（原始 URL）
+- `hashedUrl` = hash(`https://example.com/article`)
+- `hashedGivenUrl` = hash(`http://feedproxy.google.com/example`)
+
+**情况1：用原始 URL 查重**
+```
+POST /api/entries.json
+url = http://feedproxy.google.com/example
+
+findByUrlAndUserId('http://feedproxy.google.com', userId)
+    ├─ 第一步：hash('http://feedproxy.google.com/example') 匹配 hashedUrl？
+    │   └─ hashedUrl = hash('https://example.com/article') → 不匹配
+    └─ 第二步：hash('http://feedproxy.google.com/example') 匹配 hashedGivenUrl？
+        └─ hashedGivenUrl = hash('http://feedproxy.google.com/example') → ✅ 匹配
+```
+结果：✅ 能命中已存在的 Entry
+
+**情况2：given_url 被覆盖后，用原始 URL 查重**
+
+假设重抓后 given_url 被覆盖：
+- `given_url` = `https://example.com/article`（被覆盖为最终 URL）
+- `hashedGivenUrl` = hash(`https://example.com/article`)
+
+```
+POST /api/entries.json
+url = http://feedproxy.google.com/example
+
+findByUrlAndUserId('http://feedproxy.google.com/example', userId)
+    ├─ 第一步：hash('http://feedproxy.google.com/example') 匹配 hashedUrl？
+    │   └─ hashedUrl = hash('https://example.com/article') → 不匹配
+    └─ 第二步：hash('http://feedproxy.google.com/example') 匹配 hashedGivenUrl？
+        └─ hashedGivenUrl = hash('https://example.com/article') → ❌ 不匹配
+```
+结果：❌ **无法命中！会创建重复条目**
+
+**情况3：given_url 被覆盖后，用最终 URL 查重**
+```
+POST /api/entries.json
+url = https://example.com/article
+
+findByUrlAndUserId('https://example.com/article', userId)
+    ├─ 第一步：hash('https://example.com/article') 匹配 hashedUrl？
+    │   └─ hashedUrl = hash('https://example.com/article') → ✅ 匹配
+```
+结果：✅ 能命中已存在的 Entry
+
+#### 查重命中变化汇总表
+
+| 查重 URL | given_url 未被覆盖 | given_url 被覆盖为最终 URL |
+|---------|-------------------|--------------------------|
+| 原始 URL（如 `http://feedproxy.google.com/example`） | ✅ 命中（通过 hashedGivenUrl） | ❌ **不命中！创建重复** |
+| 最终 URL（如 `https://example.com/article`） | ✅ 命中（通过 hashedUrl） | ✅ 命中（通过 hashedUrl） |
+
+> **⚠️ 重要风险**：当 given_url 被覆盖后，如果用户再次提交原始 URL，将无法命中已存在的 Entry，导致创建重复条目。
+
+#### 批量查重的优化机制
+
+批量创建使用 `findByUserIdAndBatchHashedUrls` 进行批量查重：
+
+```php
+// src/Repository/EntryRepository.php:562-576
+public function findByUserIdAndBatchHashedUrls($userId, $hashedUrls)
+{
+    $qb = $this->createQueryBuilder('e')->select(['e.id', 'e.hashedUrl', 'e.hashedGivenUrl']);
+    $res = $qb->where('e.user = :user_id')->setParameter('user_id', $userId)
+              ->andWhere(
+                  $qb->expr()->orX(
+                      $qb->expr()->in('e.hashedUrl', $hashedUrls),
+                      $qb->expr()->in('e.hashedGivenUrl', $hashedUrls)
+                  )
+              )
+              ->getQuery()
+              ->getResult();
+
+    return $res;
+}
+```
+
+批量查重同样使用双重哈希，但通过一次查询返回所有匹配结果。
+
+### 3.9 origin_url 与 given_url 的边界对照
 
 | 维度 | `origin_url` | `given_url` |
 |------|-------------|-------------|
@@ -515,6 +672,7 @@ if ($this->ignoreOriginProcessor->process($entry)) {
 | **空值含义** | 没有发生重定向，或规则匹配，或 API 未设置 | 从未调用过 `updateEntry`（极少见） |
 | **用于去重检查** | ❌ 否 | ✅ 是（`findByUrlAndUserId` 同时检查 url 和 given_url） |
 | **抓取被跳过时** | 仍可能变化（如果 `$content['url']` 不同） | ⚠️ 仍会被覆盖 |
+| **被覆盖后对查重的影响** | 无影响（不参与查重） | ⚠️ 可能导致原始 URL 查重失败 |
 
 ### 3.9 三个 URL 的完整生命周期（以重抓为例）
 
