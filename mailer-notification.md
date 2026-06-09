@@ -13,11 +13,11 @@
 
 | 链路 | 触发方式 | 触发入口 | 邮件器服务 | 模板路径 | 模板结构 |
 |------|---------|---------|-----------|---------|---------|
-| **注册确认邮件** | 事件监听器 | `EmailConfirmationListener::onRegistrationSuccess()` | `fos_user.mailer.twig_symfony` | `@FOSUser/Registration/email.txt.twig` | subject / body_text / body_html |
+| **注册确认邮件** | 事件监听器 | `EmailConfirmationListener` 监听 `REGISTRATION_SUCCESS` | `fos_user.mailer.twig_symfony` | `@FOSUser/Registration/email.txt.twig` | subject / body_text / body_html |
 | **密码重置邮件** | 控制器直接调用 | `ResettingController::sendEmailAction()` | `fos_user.mailer.twig_symfony` | `@FOSUser/Resetting/email.txt.twig` | subject / body_text / body_html |
-| **双因素验证码邮件** | Bundle 内部服务调用 | `AuthCodeManager::generateAndSend()` | `Wallabag\Mailer\AuthCodeMailer` | `TwoFactor/email_auth_code.html.twig` | subject / body_text / body_html |
+| **双因素验证码邮件** | 2FA 提供者的 prepare 方法 | `EmailTwoFactorProvider::prepareAuthentication()` | `Wallabag\Mailer\AuthCodeMailer` | `TwoFactor/email_auth_code.html.twig` | subject / body_text / body_html |
 
-> **核心区别**：注册确认走**事件监听器**（可选功能，通过开关控制），密码重置走**控制器直接调用**（核心功能），双因素走**认证流程内部调用**（独立的安全模块）。
+> **核心区别**：注册确认走**事件监听器**（可选功能），密码重置走**控制器直接调用**（核心功能），双因素走**TwoFactorProvider 接口方法**（独立安全模块）。
 
 ---
 
@@ -35,18 +35,38 @@
 
 ### 1.2 FOSUserBundle 事件体系
 
-来自 FOSUserBundle v3.4.0，定义在 `FOSUserEvents` 类中。与邮件相关的事件：
+来自 FOSUserBundle v3.4.0，所有事件常量定义在 `FOS\UserBundle\FOSUserEvents` 类中。
+
+**与密码重置发送邮件相关的事件**：
 
 | 事件常量 | 触发时机 | 与邮件的关系 |
 |----------|----------|-------------|
-| `FOSUserEvents::REGISTRATION_INITIALIZE` | 注册流程初始化 | 否（Wallabag 用来控制注册开关） |
-| `FOSUserEvents::REGISTRATION_SUCCESS` | 注册表单验证通过、用户保存前 | **是** — EmailConfirmationListener 监听此事件发送确认邮件 |
-| `FOSUserEvents::REGISTRATION_COMPLETED` | 注册完成后 | 否（Wallabag 用来创建用户配置） |
-| `FOSUserEvents::USER_CREATED` | 用户被手动创建时 | 否 |
-| `FOSUserEvents::RESETTING_SEND_EMAIL_INITIALIZE` | 发送重置邮件前 | 否 — 仅作为扩展钩子 |
-| `FOSUserEvents::RESETTING_SEND_EMAIL_COMPLETED` | 发送重置邮件后 | 否 — 仅作为扩展钩子 |
-| `FOSUserEvents::RESETTING_RESET_REQUEST` | 密码重置请求页面初始化 | 否 |
-| `FOSUserEvents::RESETTING_RESET_SUCCESS` | 密码重置成功 | 否（Wallabag 用来跳转首页） |
+| `RESETTING_SEND_EMAIL_INITIALIZE` | 发送重置邮件之前 | 前置扩展点 — 可用于修改用户或拦截发送 |
+| `RESETTING_SEND_EMAIL_COMPLETED` | 发送重置邮件之后 | 后置扩展点 — 可用于日志记录等 |
+
+> **注意**：不存在 `RESETTING_SEND_EMAIL_CONFIRM` 事件。FOSUserBundle v3.4.0 中与重置邮件发送直接相关的只有上述两个事件，它们是扩展钩子，**不负责触发邮件发送**。
+
+**与注册确认相关的事件**：
+
+| 事件常量 | 触发时机 | 与邮件的关系 |
+|----------|----------|-------------|
+| `REGISTRATION_SUCCESS` | 注册表单验证通过、用户保存前 | **是** — EmailConfirmationListener 监听此事件发送确认邮件 |
+| `REGISTRATION_COMPLETED` | 注册完成后 | 否 |
+
+**所有重置相关事件一览**：
+
+| 事件常量 | 触发时机 |
+|----------|----------|
+| `RESETTING_RESET_INITIALIZE` | 重置密码页面初始化（用户点击重置链接后） |
+| `RESETTING_RESET_SUCCESS` | 重置密码表单提交成功、保存前 |
+| `RESETTING_RESET_COMPLETED` | 重置密码完成后 |
+| `RESETTING_SEND_EMAIL_INITIALIZE` | 发送重置邮件前 |
+| `RESETTING_SEND_EMAIL_COMPLETED` | 发送重置邮件后 |
+
+**事件命名约定**（FOSUserBundle 通用模式）：
+- `*_INITIALIZE` — 流程初始化后、表单创建前
+- `*_SUCCESS` — 表单验证通过后、持久化前
+- `*_COMPLETED` — 所有操作完成后
 
 ### 1.3 Wallabag 自身的事件监听器/订阅者
 
@@ -98,17 +118,13 @@ scheb_two_factor:
 
 ### 2.2 邮件器一：FOSUserBundle TwigSymfonyMailer
 
-**服务ID**：`fos_user.mailer.twig_symfony`
+**服务 ID**：`fos_user.mailer.twig_symfony`
 
 **类名**：`FOS\UserBundle\Mailer\TwigSymfonyMailer`
 
 **实现接口**：`FOS\UserBundle\Mailer\MailerInterface`
 
-**负责发送**：
-1. 注册确认邮件 — `sendConfirmationEmailMessage()`
-2. 密码重置邮件 — `sendResettingEmailMessage()`
-
-**核心方法签名**：
+**接口方法**：
 ```php
 interface MailerInterface
 {
@@ -117,16 +133,23 @@ interface MailerInterface
 }
 ```
 
+**负责发送**：
+1. 注册确认邮件 — `sendConfirmationEmailMessage()`
+2. 密码重置邮件 — `sendResettingEmailMessage()`
+
 **依赖注入**：
 - `Symfony\Component\Mailer\MailerInterface` — 底层邮件传输
 - `Twig\Environment` — Twig 模板引擎
-- `fos_user.from_email` — 发件人配置
-- 模板路径配置（注册确认和密码重置各一个）
+- `Symfony\Component\Routing\Generator\UrlGeneratorInterface` — URL 生成器
+- 发件人配置（`fos_user.from_email`）
+- 模板路径配置（注册和重置各一个）
 
-**为什么叫 twig_symfony**：
+**命名含义**：
 - `twig` — 用 Twig 模板引擎渲染邮件内容
 - `symfony` — 用 Symfony Mailer 组件发送邮件
-- 这是 FOSUserBundle 3.x 推荐的邮件器实现（替代了旧的 SwiftMailer 版本）
+- 这是 FOSUserBundle 3.x 推荐的邮件器实现
+
+**服务配置依据**：FOSUserBundle 的 `resetting.xml` 服务定义中，`fos_user.resetting.controller` 注入了 `fos_user.mailer` 作为第五个参数，证实控制器直接持有邮件器引用。
 
 ### 2.3 邮件器二：Wallabag AuthCodeMailer
 
@@ -151,10 +174,8 @@ class AuthCodeMailer implements AuthCodeMailerInterface
 
     public function sendAuthCode(TwoFactorInterface $user): void
     {
-        // 加载模板
         $template = $this->twig->load('TwoFactor/email_auth_code.html.twig');
         
-        // 分别渲染三个块
         $subject = $template->renderBlock('subject', []);
         $bodyHtml = $template->renderBlock('body_html', [
             'user' => $user->getName(),
@@ -167,7 +188,6 @@ class AuthCodeMailer implements AuthCodeMailerInterface
             'support_url' => $this->supportUrl,
         ]);
         
-        // 构建 Email 对象
         $email = (new Email())
             ->from(new Address($this->senderEmail, $this->senderName ?: $this->senderEmail))
             ->to($user->getEmailAuthRecipient())
@@ -175,7 +195,6 @@ class AuthCodeMailer implements AuthCodeMailerInterface
             ->text($bodyText)
             ->html($bodyHtml);
         
-        // 发送
         $this->mailer->send($email);
     }
 }
@@ -197,9 +216,9 @@ class AuthCodeMailer implements AuthCodeMailerInterface
 │                                                                   │
 │  ┌─────────────────────┐  ┌──────────────────┐  ┌───────────────┐  │
 │  │ 注册确认邮件        │  │ 密码重置邮件     │  │ 双因素验证码  │  │
-│  │ EmailConfirmation   │  │ ResettingControl- │  │ AuthCodeManager│ │
-│  │ Listener            │  │ ler::sendEmail()   │  │               │  │
-│  │ (事件监听器)        │  │ (控制器直接调用)  │  │ (服务直接调用) │  │
+│  │ EmailConfirmation   │  │ ResettingControl- │  │ EmailTwoFactor│ │
+│  │ Listener            │  │ ler::sendEmail()   │  │ Provider      │  │
+│  │ (事件监听器)        │  │ (控制器直接调用)  │  │ (prepare方法)  │  │
 │  └──────────┬──────────┘  └────────┬─────────┘  └───────┬───────┘  │
 └─────────────┼──────────────────────┼──────────────────────┼──────────┘
               │                      │                      │
@@ -251,18 +270,20 @@ class AuthCodeMailer implements AuthCodeMailerInterface
 
 {% block subject %}
 {%- autoescape false -%}
-{{ 'registration.email.subject'|trans({'%username%': user.username}) }}
+{{ 'resetting.email.subject'|trans({'%username%': user.username}) }}
 {%- endautoescape -%}
 {% endblock %}
 
 {% block body_text %}
 {% autoescape false %}
-{{ 'registration.email.message'|trans({'%username%': user.username, '%confirmationUrl%': confirmationUrl}) }}
+{{ 'resetting.email.message'|trans({'%username%': user.username, '%confirmationUrl%': confirmationUrl}) }}
 {% endautoescape %}
 {% endblock %}
 
 {% block body_html %}{% endblock %}
 ```
+
+> **注意**：FOSUserBundle 默认的邮件模板只有纯文本版本，`body_html` 块是空的。
 
 **双因素邮件模板结构**（HTML + 纯文本）：
 
@@ -327,6 +348,11 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
 
 **前置条件**：`fos_user.registration.confirmation.enabled = true`
 
+**调用链依据**：
+- `fos_user.registration.confirmation.enabled` 配置项控制是否启用确认
+- 启用时注册 `EmailConfirmationListener` 服务，监听 `REGISTRATION_SUCCESS` 事件
+- `REGISTRATION_SUCCESS` 在注册表单验证通过后、用户保存前触发
+
 **完整调用链**：
 
 ```
@@ -337,12 +363,11 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    │
    ├─► 验证表单数据
    ├─► 创建 User 对象
-   └─► 触发 FOSUserEvents::REGISTRATION_SUCCESS 事件
-       (FormEvent $event)
+   └─► 触发 FOSUserEvents::REGISTRATION_SUCCESS 事件 (FormEvent)
    │
    ▼
 3. EmailConfirmationListener::onRegistrationSuccess()
-   （FOSUserBundle 内置监听器，监听 REGISTRATION_SUCCESS）
+   （FOSUserBundle 内置监听器，仅在 confirmation.enabled=true 时注册）
    │
    ├─► 生成确认 token：$tokenGenerator->generateToken()
    ├─► 保存到用户：$user->setConfirmationToken($token)
@@ -356,8 +381,8 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    ├─► 生成确认 URL：$router->generate('fos_user_registration_confirm', ...)
    ├─► 加载模板：@FOSUser/Registration/email.txt.twig
    ├─► 渲染 subject 块
-   ├─► 渲染 body_text 块（包含 confirmationUrl）
-   ├─► 渲染 body_html 块（通常为空，纯文本邮件）
+   ├─► 渲染 body_text 块（含 confirmationUrl）
+   ├─► 渲染 body_html 块（默认空）
    ├─► 构建 Email 对象
    │   └─► 发件人：fos_user.from_email
    └─► 调用 $this->mailer->send($email)
@@ -370,23 +395,39 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    └─► 跳转到 fos_user_registration_check_email 路由
 ```
 
-**代码依据**：
-- FOSUserBundle 官方文档明确指出 `EmailConfirmationListener` 监听 `REGISTRATION_SUCCESS` 事件，且优先级高于用户自定义监听器
-- Wallabag 配置确认启用：[config.yml L196](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L196-L196)
-- 邮件器配置：[config.yml L201](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L201-L201)
-- 发件人配置：[config.yml L197-L199](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L197-L199)
+**配置依据**：
+- 开关：[config.yml L196](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L196-L196) `fos_user.registration.confirmation.enabled`
+- 邮件器：[config.yml L201](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L201-L201) `fos_user.service.mailer`
+- 发件人：[config.yml L197-L199](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L197-L199) `fos_user.from_email`
 
 **为什么用事件监听器而不是控制器直接调用**：
 - 注册确认是**可选功能**，由 `confirmation.enabled` 控制
-- 通过事件监听器可以在不修改控制器代码的情况下启用/禁用该功能
-- 这是 Symfony 生态的典型设计：核心控制器触发事件，可选功能通过监听器扩展
-- 监听器优先级设计：`EmailConfirmationListener` 的优先级高于用户自定义监听器，确保确认邮件优先发送
+- 通过事件监听器可以有条件地注册服务，不修改核心控制器代码
+- 监听器服务只在启用确认功能时才会被注册到容器中
+
+**关于 REGISTRATION_SUCCESS 事件监听器的顺序**：
+- `EmailConfirmationListener` 由 FOSUserBundle 内部注册
+- 自定义监听器如需在确认邮件发送前执行逻辑，需设置合适的事件优先级
+- 注意：确认邮件发送后会设置重定向响应，后续监听器无法改变跳转目标
 
 ---
 
 ### 链路二：密码重置邮件（控制器直接调用）
 
-**完整调用链**：
+**调用链依据**：
+- `fos_user.resetting.controller` 服务定义中直接注入了 `fos_user.mailer`（第五个参数）
+- `RESETTING_SEND_EMAIL_INITIALIZE` 和 `RESETTING_SEND_EMAIL_COMPLETED` 是发送前后的扩展钩子
+- 邮件发送是 `sendEmailAction` 的核心职责，不由事件触发
+
+**ResettingController 构造函数参数**（依据 FOSUserBundle v3.4.0 的 resetting.xml）：
+1. `event_dispatcher` — 事件分发器
+2. `fos_user.resetting.form.factory` — 重置密码表单工厂
+3. `fos_user.user_manager` — 用户管理器
+4. `fos_user.util.token_generator` — Token 生成器
+5. `fos_user.mailer` — **邮件器（直接依赖，证明控制器直接调用）**
+6. `%fos_user.resetting.retry_ttl%` — 重发冷却时间
+
+**完整调用链（sendEmailAction）**：
 
 ```
 1. 用户在"忘记密码"页面提交邮箱
@@ -394,27 +435,29 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    ▼
 2. FOSUserBundle ResettingController::sendEmailAction()
    │
-   ├─► 查找用户（通过用户名或邮箱）
+   ├─► 根据用户名或邮箱查找用户
    │
-   ├─► 触发 RESETTING_SEND_EMAIL_INITIALIZE 事件
-   │   （扩展点，不影响核心流程）
+   ├─► 触发 FOSUserEvents::RESETTING_SEND_EMAIL_INITIALIZE 事件
+   │   （扩展点：可在此修改用户或拦截发送）
    │
-   ├─► 检查是否在冷却时间内（retry_ttl）
-   │   └─► 如果是，直接跳转到 check_email 页面（不发邮件）
+   ├─► 检查是否在冷却时间内
+   │   (passwordRequestedAt + retry_ttl > now ?)
+   │   └─► 如果在冷却期内，直接跳转到 check_email
+   │       （不发邮件，防止恶意频繁发送）
    │
    ├─► 生成重置 token：$tokenGenerator->generateToken()
-   ├─► 设置密码请求时间：$user->setPasswordRequestedAt(...)
+   ├─► 设置到用户：$user->setConfirmationToken($token)
+   ├─► 设置密码请求时间：$user->setPasswordRequestedAt(new \DateTime())
    ├─► 保存用户：$userManager->updateUser($user)
    │
-   ├─► 直接调用邮件器：
+   ├─► 直接调用邮件器发送：
    │   $this->mailer->sendResettingEmailMessage($user)
-   │   ↑ 注意：这里是直接调用，不是通过事件！
+   │   ↑ 注意：这是控制器直接调用，不是通过事件触发！
    │
-   ├─► 触发 RESETTING_SEND_EMAIL_COMPLETED 事件
-   │   （扩展点，不影响核心流程）
+   ├─► 触发 FOSUserEvents::RESETTING_SEND_EMAIL_COMPLETED 事件
+   │   （扩展点：可在此做日志记录等）
    │
-   └─► 设置 session 标记并重定向
-       └─► 跳转到 fos_user_resetting_check_email 路由
+   └─► 设置 session 标记，重定向到 check_email 页面
    │
    ▼
 3. TwigSymfonyMailer::sendResettingEmailMessage($user)
@@ -422,8 +465,8 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    ├─► 生成重置 URL：$router->generate('fos_user_resetting_reset', ...)
    ├─► 加载模板：@FOSUser/Resetting/email.txt.twig
    ├─► 渲染 subject 块
-   ├─► 渲染 body_text 块（包含 confirmationUrl）
-   ├─► 渲染 body_html 块（通常为空）
+   ├─► 渲染 body_text 块（含 confirmationUrl）
+   ├─► 渲染 body_html 块（默认空）
    ├─► 构建 Email 对象
    │   └─► 发件人：fos_user.from_email
    └─► 调用 $this->mailer->send($email)
@@ -435,23 +478,62 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
 5. 用户收到包含重置链接的邮件
 ```
 
-**代码依据**：
-- FOSUserBundle 的 `ResettingController` 服务定义中注入了 `fos_user.mailer`（来源：FOSUserBundle 3.x 源码 resetting.xml 配置）
-- 控制器方法中直接调用 `$this->mailer->sendResettingEmailMessage($user)`
-- 两个事件 `RESETTING_SEND_EMAIL_INITIALIZE` 和 `RESETTING_SEND_EMAIL_COMPLETED` 是发送前后的扩展钩子，**不是用来触发邮件发送的**
+**关键顺序总结**（sendEmailAction 内）：
+
+```
+查找用户
+  ↓
+RESETTING_SEND_EMAIL_INITIALIZE 事件
+  ↓
+检查冷却时间（如在冷却期内直接跳转）
+  ↓
+生成 token → setConfirmationToken
+  ↓
+setPasswordRequestedAt
+  ↓
+updateUser （持久化）
+  ↓
+sendResettingEmailMessage （发送邮件）
+  ↓
+RESETTING_SEND_EMAIL_COMPLETED 事件
+  ↓
+跳转 check_email
+```
+
+**配置依据**：
+- 邮件器：[config.yml L201](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L201-L201) `fos_user.service.mailer`
+- 发件人：[config.yml L197-L199](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L197-L199) `fos_user.from_email`
 
 **为什么用控制器直接调用而不是事件监听器**：
 - 发送重置邮件是密码重置流程的**核心职责**，不是可选扩展
-- 发送邮件本身就是控制器业务逻辑的一部分
+- 邮件发送本身就是控制器业务逻辑的一部分
 - 相比注册确认，密码重置不需要在事件中做"是否发送"的决策
 
-**相关事件的作用**（仅供扩展，不触发邮件）：
-- `RESETTING_SEND_EMAIL_INITIALIZE` — 发送前拦截（可用于修改用户或取消发送）
-- `RESETTING_SEND_EMAIL_COMPLETED` — 发送后通知（可用于日志记录等）
+**RESETTING_SEND_EMAIL_* 事件的作用**：
+- `RESETTING_SEND_EMAIL_INITIALIZE` — 发送前钩子。可用于：修改用户信息、根据业务条件取消发送、记录发送前日志等
+- `RESETTING_SEND_EMAIL_COMPLETED` — 发送后钩子。可用于：发送审计日志、触发其他通知等
+
+> **澄清**：这两个事件是**扩展点**，不是**触发点**。邮件发送是控制器直接调用的，事件只是在发送前后提供拦截机会。
 
 ---
 
-### 链路三：双因素验证码邮件（认证流程内部调用）
+### 链路三：双因素验证码邮件（TwoFactorProvider prepare 方法）
+
+**调用链依据**：
+- `scheb/2fa-email` v5.x 通过 `TwoFactorProviderInterface` 接口提供双因素认证
+- 邮箱 2FA 的提供者是 `EmailTwoFactorProvider`
+- `prepareAuthentication()` 方法负责准备工作（生成验证码并发送邮件）
+- Wallabag 配置了自定义 mailer：`scheb_two_factor.email.mailer: Wallabag\Mailer\AuthCodeMailer`
+
+**TwoFactorProviderInterface 核心方法**：
+
+| 方法 | 作用 |
+|------|------|
+| `beginAuthentication($context)` | 登录成功后调用，判断该提供者是否需要对用户进行 2FA |
+| `needsPreparation()` | 是否需要准备阶段（邮箱 2FA 返回 true） |
+| `prepareAuthentication($user)` | 准备工作（生成验证码、发送邮件） |
+| `validateAuthenticationCode($user, $code)` | 验证用户输入的验证码 |
+| `getFormRenderer()` | 获取 2FA 表单渲染器 |
 
 **完整调用链**：
 
@@ -462,14 +544,22 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
 2. Symfony Security 认证成功（第一因素通过）
    │
    ▼
-3. SchebTwoFactorBundle 认证拦截器检测
+3. SchebTwoFactorBundle 的 2FA 防火墙拦截
    │
-   ├─► 检查用户是否实现 TwoFactorInterface
-   ├─► 检查 isEmailAuthEnabled() 是否返回 true
-   └─► 是，进入邮箱 2FA 流程
+   ├─► 遍历所有启用的 TwoFactorProvider
+   └─► 对每个 provider 调用 beginAuthentication()
    │
    ▼
-4. SchebTwoFactorBundle 的 AuthCodeManager
+4. EmailTwoFactorProvider::beginAuthentication($context)
+   │
+   ├─► 检查用户是否实现 Email\TwoFactorInterface
+   └─► 调用 isEmailAuthEnabled() 判断是否启用邮箱 2FA
+   │
+   ▼
+5. 如果需要邮箱 2FA，进入准备阶段
+   │
+   ▼
+6. EmailTwoFactorProvider::prepareAuthentication($user)
    │
    ├─► 生成随机验证码（6位数字）
    ├─► 保存到用户对象：setEmailAuthCode($code)
@@ -477,7 +567,7 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
        $this->mailer->sendAuthCode($user)
    │
    ▼
-5. Wallabag\Mailer\AuthCodeMailer::sendAuthCode($user)
+7. Wallabag\Mailer\AuthCodeMailer::sendAuthCode($user)
    │
    ├─► 加载模板：TwoFactor/email_auth_code.html.twig
    ├─► 渲染 subject 块
@@ -494,27 +584,35 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
    └─► 调用 $this->mailer->send($email)
    │
    ▼
-6. Symfony Mailer 发送邮件
+8. Symfony Mailer 发送邮件
    │
    ▼
-7. 用户跳转到 2FA 输入页面（/2fa）
+9. 用户跳转到 2FA 输入页面（/2fa）
    │
    ▼
-8. 用户查收邮件，输入验证码
+10. 用户查收邮件，输入验证码
 ```
 
-**代码依据**：
-- 邮件器配置：[config.yml L234](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L234-L234) `scheb_two_factor.email.mailer`
-- 发件人配置：[config.yml L231](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L231-L231) `scheb_two_factor.email.sender_email`
+**配置依据**：
+- 开关：[config.yml L230](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L230-L230) `scheb_two_factor.email.enabled`
+- 发件人：[config.yml L231](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L231-L231) `scheb_two_factor.email.sender_email`
+- 自定义邮件器：[config.yml L234](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L234-L234) `scheb_two_factor.email.mailer`
 - 验证码位数：[config.yml L232](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/app/config/config.yml#L232-L232) `scheb_two_factor.email.digits`
+
+**代码依据**：
 - 自定义邮件器实现：[AuthCodeMailer.php](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/src/Mailer/AuthCodeMailer.php)
 - 邮件模板：[email_auth_code.html.twig](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/templates/TwoFactor/email_auth_code.html.twig)
 - User 实体实现：[User.php](file:///d:/fz/0508-2/solo-dogfeeding/code/109-wallabag/src/Entity/User.php#L285-L303)
 
-**为什么用 Bundle 内部服务调用而不是事件**：
-- SchebTwoFactorBundle 是独立的安全认证模块，不依赖 FOSUserBundle 的事件体系
-- 双因素认证是安全流程的一部分，有自己的拦截器和管理器
-- 通过配置 `scheb_two_factor.email.mailer` 来指定邮件器实现，是策略模式的设计
+**为什么用 Provider 接口而不是事件**：
+- SchebTwoFactorBundle 是独立的安全认证模块，遵循 Symfony Security 的设计模式
+- 双因素认证有自己的完整流程（开始 → 准备 → 验证 → 完成）
+- 通过 `TwoFactorProviderInterface` 接口实现策略模式，支持多种 2FA 方式（邮箱、TOTP、Google Authenticator 等）
+- `prepareAuthentication` 是提供者准备阶段的标准入口，邮箱 2FA 在这里生成和发送验证码
+
+**触发时机说明**：
+- 不是通过事件触发，而是在 2FA 认证流程中被框架调用
+- 默认在登录成功后立即触发（也可配置 `prepare_on_login` / `prepare_on_access_denied` 调整时机）
 
 ---
 
@@ -552,19 +650,29 @@ FOSUserBundle 的模板可以通过在 `templates/bundles/FOSUserBundle/` 下创
 ## 常见疑问解答
 
 **Q: 密码重置邮件到底是事件触发还是控制器直接调用？**
-A: **控制器直接调用**。FOSUserBundle 的 `ResettingController::sendEmailAction()` 方法中直接调用 `$this->mailer->sendResettingEmailMessage($user)` 发送邮件。虽然也有 `RESETTING_SEND_EMAIL_INITIALIZE` 和 `RESETTING_SEND_EMAIL_COMPLETED` 事件，但这些是发送前后的扩展钩子，不是用来触发邮件发送的。
+A: **控制器直接调用**。FOSUserBundle 的 `ResettingController::sendEmailAction()` 方法中直接调用 `$this->mailer->sendResettingEmailMessage($user)` 发送邮件。虽然也有 `RESETTING_SEND_EMAIL_INITIALIZE` 和 `RESETTING_SEND_EMAIL_COMPLETED` 两个事件，但它们是发送前后的**扩展钩子**，不是**触发点**。
+
+**Q: 有没有 RESETTING_SEND_EMAIL_CONFIRM 事件？**
+A: **没有**。FOSUserBundle v3.4.0 中与密码重置邮件发送相关的事件是：
+- `RESETTING_SEND_EMAIL_INITIALIZE` — 发送前
+- `RESETTING_SEND_EMAIL_COMPLETED` — 发送后
+
+不存在 `RESETTING_SEND_EMAIL_CONFIRM` 事件。可能是名字记混了。
 
 **Q: 注册确认邮件为什么用事件监听器？**
-A: 因为注册确认是**可选功能**（由 `confirmation.enabled` 开关控制）。通过事件监听器模式，可以在不修改控制器代码的情况下，根据配置决定是否启用邮件确认功能。监听器的服务定义是有条件注册的（只在启用确认时才注册）。
+A: 因为注册确认是**可选功能**，由 `confirmation.enabled` 开关控制。通过事件监听器模式，可以在不修改控制器代码的情况下，有条件地注册服务。监听器服务只在启用确认功能时才会被注册到容器中。
 
 **Q: 双因素验证码邮件是事件触发的吗？**
-A: **不是**。它由 SchebTwoFactorBundle 的 `AuthCodeManager` 在认证流程中直接调用配置的 mailer 服务发送。SchebTwoFactorBundle 有自己的安全拦截器和管理器，不依赖 FOSUserBundle 的事件体系。
+A: **不是**。它由 SchebTwoFactorBundle 的 `EmailTwoFactorProvider::prepareAuthentication()` 方法触发，该方法实现了 `TwoFactorProviderInterface` 接口。这是 Symfony Security 2FA 流程的标准设计，每个 2FA 提供者都有自己的 prepare 方法来做准备工作。
 
 **Q: Wallabag 自身代码里为什么找不到直接发邮件的地方？**
 A: 因为邮件发送逻辑全部封装在两个第三方 Bundle 内部。Wallabag 只负责：
 1. 在配置中指定使用哪个邮件器服务
 2. 为双因素认证提供自定义的 `AuthCodeMailer` 实现
 3. 为双因素邮件提供自定义模板
+
+**Q: sendResettingEmailMessage 和 setPasswordRequestedAt 哪个先执行？**
+A: 顺序是：`setConfirmationToken` → `setPasswordRequestedAt` → `updateUser` → `sendResettingEmailMessage`。先把 token 和请求时间保存到数据库，然后再发送邮件。这样即使邮件发送失败，用户的重置请求状态也已经记录下来了。
 
 **Q: FOSUserBundle 的邮件模板为什么是 .txt.twig 后缀？**
 A: 因为默认的 FOSUserBundle 邮件是纯文本格式的。虽然模板里也有 `body_html` 块，但默认是空的。如果需要 HTML 邮件，可以覆盖模板并在 `body_html` 块中添加 HTML 内容。
@@ -574,7 +682,7 @@ A: 这个文件是早期版本遗留下来的。当前版本使用 FOSUserBundle
 
 **Q: 如何添加新的邮件通知类型？**
 A: 标准做法：
-1. 创建自定义事件类（如果需要解耦）
+1. 如果需要解耦，创建自定义事件类
 2. 在业务逻辑的合适位置触发事件
 3. 创建事件订阅者监听该事件
 4. 在订阅者中注入 `MailerInterface` 并发送邮件
