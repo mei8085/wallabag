@@ -8,7 +8,7 @@
 
 ### 1.1 三大状态属性
 
-条目（Entry）有三个独立的布尔状态，定义在 `src/Entity/Entry.php`：
+条目（Entry）有三个独立的布尔状态，定义在 `src/Entity/Entry.php:1-958`：
 
 | 状态 | 字段 | 类型 | 默认值 | 时间戳字段 |
 |------|------|------|---------|-----------|
@@ -239,7 +239,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 #### 3.1.1 MainVoter（全局操作权限）
 
-**文件**：`src/Security/Voter/MainVoter.php`
+**文件**：`src/Security/Voter/MainVoter.php:1-49`
 **适用场景**：不需要具体主体（subject）的全局/批量操作
 
 **支持的属性常量**：`src/Security/Voter/MainVoter.php:11-22`
@@ -269,7 +269,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 #### 3.1.2 EntryVoter（单条目权限）
 
-**文件**：`src/Security/Voter/EntryVoter.php`
+**文件**：`src/Security/Voter/EntryVoter.php:1-55`
 **适用场景**：针对具体 Entry 实体的单条操作
 
 **支持的属性常量**：`src/Security/Voter/EntryVoter.php:12-25`
@@ -367,19 +367,97 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 - Web 单条归档权限：`src/Controller/EntryController.php:436` → `ARCHIVE`
 - Web 单条星标权限：`src/Controller/EntryController.php:467` → `STAR`
 - Web 单条删除权限：`src/Controller/EntryController.php:499` → `DELETE`
-- Web 批量权限：`src/Controller/EntryController.php:54 + :108` → `EDIT_ENTRIES` + 单条 `EDIT`
+- Web 批量入口权限：`src/Controller/EntryController.php:54` → `EDIT_ENTRIES`（全局）
+- Web 批量单条权限：`src/Controller/EntryController.php:108` → `EDIT`（单条）
 - API PATCH 单条权限：`src/Controller/Api/EntryRestController.php:939` → `EDIT`
-- API 批量删除权限：`src/Controller/Api/EntryRestController.php:479 + :499` → `DELETE_ENTRIES` + 单条 `DELETE`
-- API 批量加标签权限：`src/Controller/Api/EntryRestController.php:1346 + :1369` → `CREATE_TAGS` + 单条 `TAG`
-- API 批量删标签权限：`src/Controller/Api/EntryRestController.php:1281 + :1304` → `DELETE_TAGS` + 单条 `UNTAG`
+- API 批量删除入口权限：`src/Controller/Api/EntryRestController.php:479` → `DELETE_ENTRIES`（全局）
+- API 批量删除单条权限：`src/Controller/Api/EntryRestController.php:499` → `DELETE`（单条）
+- API 批量加标签入口权限：`src/Controller/Api/EntryRestController.php:1346` → `CREATE_TAGS`（全局）
+- API 批量加标签单条权限：`src/Controller/Api/EntryRestController.php:1369` → `TAG`（单条）
+- API 批量删标签入口权限：`src/Controller/Api/EntryRestController.php:1281` → `DELETE_TAGS`（全局）
+- API 批量删标签单条权限：`src/Controller/Api/EntryRestController.php:1304` → `UNTAG`（单条）
 
 > **说明**：虽然目前 `EntryVoter` 中所有权限的校验条件相同（都是所有者判断），但权限常量的粒度设计不一致，未来如果扩展更细的权限（如「只能归档不能删除」），这些不一致可能导致问题。
 
 ---
 
-## 四、不统一点汇总（快速索引）
+## 四、三部分交叉引用对照表
 
-### 4.1 状态切换方法不一致
+以下表格将状态机、批量入口、权限失败处理三部分的对应点一一列出，每个引用均为独立的仓库相对路径，可直接跳转复核。
+
+### 4.1 Web 批量 toggle-read（归档切换）
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 状态机方法 | `src/Entity/Entry.php:384-389` | `toggleArchive()` 方法，调用 `updateArchived()` 更新时间戳 |
+| 状态机时间戳更新 | `src/Entity/Entry.php:335-344` | `updateArchived()` 方法，同步更新 `archivedAt` |
+| 批量入口调用 | `src/Controller/EntryController.php:112-113` | massAction 中调用 `$entry->toggleArchive()` |
+| 全局权限入口 | `src/Controller/EntryController.php:54` | `#[IsGranted('EDIT_ENTRIES')]` |
+| 单条权限校验 | `src/Controller/EntryController.php:108` | `$this->security->isGranted('EDIT', $entry)` |
+| 权限失败处理 | `src/Controller/EntryController.php:109` | 抛 `AccessDeniedException`，整体终止 |
+| 权限常量定义（全局） | `src/Security/Voter/MainVoter.php:13` | `EDIT_ENTRIES` 常量 |
+| 权限常量定义（单条） | `src/Security/Voter/EntryVoter.php:13` | `EDIT` 常量 |
+| 权限校验逻辑 | `src/Security/Voter/EntryVoter.php:40-54` | 所有者校验 |
+
+### 4.2 Web 批量 toggle-star（星标切换）
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 状态机方法 | `src/Entity/Entry.php:423-428` | `toggleStar()` 方法，**不更新**时间戳 |
+| 状态机时间戳方法 | `src/Entity/Entry.php:539-548` | `updateStar()` 方法，本应被调用但未被调用 |
+| 批量入口调用 | `src/Controller/EntryController.php:114-115` | 仅调用 `$entry->toggleStar()`（Bug 位置） |
+| 单条对比（正确） | `src/Controller/EntryController.php:474-475` | 单条调用 `toggleStar()` + `updateStar()` |
+| 全局权限入口 | `src/Controller/EntryController.php:54` | `#[IsGranted('EDIT_ENTRIES')]` |
+| 单条权限校验 | `src/Controller/EntryController.php:108` | `$this->security->isGranted('EDIT', $entry)` |
+| 权限失败处理 | `src/Controller/EntryController.php:109` | 抛 `AccessDeniedException`，整体终止 |
+
+### 4.3 Web 批量 delete（删除）
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 批量入口调用 | `src/Controller/EntryController.php:123-125` | 调用 `remove()` + 事件派发 |
+| 全局权限入口 | `src/Controller/EntryController.php:54` | `#[IsGranted('EDIT_ENTRIES')]`（粒度过粗） |
+| 单条权限校验 | `src/Controller/EntryController.php:108` | `$this->security->isGranted('EDIT', $entry)`（粒度过粗） |
+| 单条对比（正确） | `src/Controller/EntryController.php:499` | 单条使用 `#[IsGranted('DELETE', ...)]` |
+| 权限失败处理 | `src/Controller/EntryController.php:109` | 抛 `AccessDeniedException`，整体终止 |
+
+### 4.4 API 批量删除
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 批量入口方法 | `src/Controller/Api/EntryRestController.php:478-511` | `deleteEntriesListAction()` |
+| 全局权限入口 | `src/Controller/Api/EntryRestController.php:479` | `#[IsGranted('DELETE_ENTRIES')]` |
+| 单条权限校验 | `src/Controller/Api/EntryRestController.php:499` | `isGranted('DELETE', $entry)`（粒度正确） |
+| 权限失败处理 | `src/Controller/Api/EntryRestController.php:499` | if 判断静默跳过，不抛异常 |
+| flush 时机 | `src/Controller/Api/EntryRestController.php:504` | 逐条 flush |
+| 权限常量定义（全局） | `src/Security/Voter/MainVoter.php:16` | `DELETE_ENTRIES` 常量 |
+| 权限常量定义（单条） | `src/Security/Voter/EntryVoter.php:20` | `DELETE` 常量 |
+
+### 4.5 API 批量加标签
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 批量入口方法 | `src/Controller/Api/EntryRestController.php:1345-1378` | `postEntriesTagsListAction()` |
+| 全局权限入口 | `src/Controller/Api/EntryRestController.php:1346` | `#[IsGranted('CREATE_TAGS')]` |
+| 单条权限校验 | `src/Controller/Api/EntryRestController.php:1369` | `isGranted('TAG', $entry)`（粒度正确） |
+| 权限失败处理 | `src/Controller/Api/EntryRestController.php:1369` | if 判断静默跳过 |
+| flush 时机 | `src/Controller/Api/EntryRestController.php:1373` | 逐条 flush |
+
+### 4.6 API 批量删标签
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 批量入口方法 | `src/Controller/Api/EntryRestController.php:1280-1322` | `deleteEntriesTagsListAction()` |
+| 全局权限入口 | `src/Controller/Api/EntryRestController.php:1281` | `#[IsGranted('DELETE_TAGS')]` |
+| 单条权限校验 | `src/Controller/Api/EntryRestController.php:1304` | `isGranted('UNTAG', $entry)`（粒度正确） |
+| 权限失败处理 | `src/Controller/Api/EntryRestController.php:1304` | if 判断静默跳过 |
+| flush 时机 | `src/Controller/Api/EntryRestController.php:1317` | 逐条 flush |
+
+---
+
+## 五、不统一点汇总（快速索引）
+
+### 5.1 状态切换方法不一致
 
 | 场景 | 归档方法 | 星标方法 | 星标时间戳 |
 |------|---------|---------|-----------|
@@ -393,7 +471,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 **核心问题**：Web 批量切换星标时 `starredAt` 不更新。
 **Bug 位置**：`src/Controller/EntryController.php:115`
 
-### 4.2 权限失败处理不一致
+### 5.2 权限失败处理不一致
 
 | 接口 | 权限失败行为 | 代码位置 |
 |------|-------------|---------|
@@ -402,36 +480,36 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | API 批量加标签 | 静默跳过，继续处理 | `src/Controller/Api/EntryRestController.php:1369` |
 | API 批量删标签 | 静默跳过，继续处理 | `src/Controller/Api/EntryRestController.php:1304` |
 
-### 4.3 权限粒度不一致
+### 5.3 权限粒度不一致
 
 - Web 批量统一用 `EDIT` 权限（粒度过粗）
 - API 批量用对应操作权限（粒度较细）
 
-### 4.4 flush 时机不一致
+### 5.4 flush 时机不一致
 
 - Web 批量：循环结束后一次 flush（`src/Controller/EntryController.php:129`）
 - API 批量：逐条 flush（性能较低）
 
-### 4.5 标识方式不一致
+### 5.5 标识方式不一致
 
 - Web 批量：条目 ID 数组（`entry-checkbox`）
 - API 批量：URL 数组（JSON）
 
-### 4.6 数量限制不一致
+### 5.6 数量限制不一致
 
 - API 批量创建：受 `apiLimitMassActions` 限制（`src/Controller/Api/EntryRestController.php:542`）
 - Web 批量及其他 API 批量：无显式数量限制
 
 ---
 
-## 五、代码文件索引
+## 六、代码文件索引
 
-| 文件 | 仓库相对路径 | 说明 |
-|------|-------------|------|
-| Entry 实体 | `src/Entity/Entry.php` | 状态属性及切换方法 |
-| Web 入口控制器 | `src/Controller/EntryController.php` | 单条 + 批量 Web 操作 |
-| API 入口控制器 | `src/Controller/Api/EntryRestController.php` | API 单条 + 批量操作 |
-| API 基类 | `src/Controller/Api/WallabagRestController.php` | `apiLimitMassActions` 等公共属性 |
-| 条目权限 Voter | `src/Security/Voter/EntryVoter.php` | 单条目权限校验 |
-| 全局权限 Voter | `src/Security/Voter/MainVoter.php` | 全局/批量操作权限校验 |
-| 前端批量控制器 | `assets/controllers/batch_edit_controller.js` | 前端批量选择交互 |
+| 文件 | 仓库相对路径（可跳转） | 说明 |
+|------|----------------------|------|
+| Entry 实体 | `src/Entity/Entry.php:1-958` | 状态属性及切换方法 |
+| Web 入口控制器 | `src/Controller/EntryController.php:1-738` | 单条 + 批量 Web 操作 |
+| API 入口控制器 | `src/Controller/Api/EntryRestController.php:1-1420` | API 单条 + 批量操作 |
+| API 基类 | `src/Controller/Api/WallabagRestController.php:1-123` | `apiLimitMassActions` 等公共属性 |
+| 条目权限 Voter | `src/Security/Voter/EntryVoter.php:1-55` | 单条目权限校验 |
+| 全局权限 Voter | `src/Security/Voter/MainVoter.php:1-49` | 全局/批量操作权限校验 |
+| 前端批量控制器 | `assets/controllers/batch_edit_controller.js:1-15` | 前端批量选择交互 |
