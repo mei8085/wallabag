@@ -86,7 +86,7 @@ return match ($attribute) {
 
 | 权限属性 | 所属 Voter | subject | 判定逻辑 | 适用场景 |
 |---------|-----------|---------|---------|---------|
-| `CREATE_ENTRIES` | MainVoter | 无 | `ROLE_USER` 角色 | 创建条目、批量操作、列表查询 |
+| `LIST_ENTRIES` / `CREATE_ENTRIES` 等 `*_ENTRIES` | MainVoter | 无 | `ROLE_USER` 角色 | 创建条目、列表查询、批量操作等全局操作 |
 | `EDIT` / `VIEW` / `DELETE` 等 | EntryVoter | Entry 实例 | 必须是所有者 | 对具体条目的读写删 |
 
 ### 3.2 CREATE_ENTRIES 的职责范围
