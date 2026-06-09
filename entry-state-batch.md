@@ -76,20 +76,31 @@
 
 ### 1.4 公开状态切换方法
 
-#### 1.4.1 `generateUid()`
-- **位置**：`src/Entity/Entry.php:767-773`
-- **行为**：如果 `uid` 为 null，生成 `uniqid('', true)`，将条目设为公开
-- **返回**：void
+公开状态是由 `uid` 字段派生的虚拟属性，没有单独的布尔字段。
 
-#### 1.4.2 `cleanUid()`
-- **位置**：`src/Entity/Entry.php:775-778`
-- **行为**：将 `uid` 设为 null，将条目设为私有
-- **返回**：void
-
-#### 1.4.3 `isPublic()`
+#### 1.4.1 `isPublic()` —— 状态读取
 - **位置**：`src/Entity/Entry.php:789-792`
-- **行为**：返回 `null !== $this->uid`
+- **行为**：返回 `null !== $this->uid`，即只要 `uid` 不为 null 就算公开
 - **返回**：bool
+- **序列化**：虚拟属性，序列化为 `is_public`（`src/Entity/Entry.php:786-788`）
+
+#### 1.4.2 `generateUid()` —— 设为公开
+- **位置**：`src/Entity/Entry.php:767-773`
+- **行为**：如果 `uid` 为 null，则用 `uniqid('', true)` 生成一个 23 位的唯一 ID，将条目设为公开
+- **幂等性**：如果已经有 `uid`，不重复生成
+- **返回**：void
+
+#### 1.4.3 `cleanUid()` —— 设为私有
+- **位置**：`src/Entity/Entry.php:775-778`
+- **行为**：将 `uid` 设为 null，将条目设为私有（不公开）
+- **返回**：void
+
+#### 1.4.4 `uid` 字段定义
+- **位置**：`src/Entity/Entry.php:53-55`
+- **类型**：string，长度 23，可为 null
+- **序列化**：`entries_for_user` + `export_all` 分组均包含
+
+> ⚠️ **注意**：与归档、星标不同，公开状态没有「toggle」方法。设为公开用 `generateUid()`，设为私有用 `cleanUid()`，需要调用方显式判断方向。
 
 ---
 
@@ -229,15 +240,129 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 **权限失败**：静默跳过，继续处理
 **flush 时机**：逐条 flush（`src/Controller/Api/EntryRestController.php:1317`）
 
+### 2.3 关于「批量切换公开状态」
+
+**结论：当前代码中没有批量切换公开状态的接口。**
+
+- Web 端 `massAction` 支持 4 种操作：`toggle-read`、`toggle-star`、`delete`、`tag`，不含公开/私有切换（`src/Controller/EntryController.php:66-72`）
+- API 端批量接口有 4 个：批量创建、批量删除、批量加标签、批量删标签，不含批量切换公开状态
+- 公开状态的切换目前仅支持**单条**操作（见第三章）
+
 ---
 
-## 三、权限校验体系
+## 三、公开状态切换入口与权限
 
-### 3.1 两层 Voter 架构
+公开状态（isPublic）由 `uid` 派生，切换操作均为**单条**操作，目前没有批量切换接口。
+
+### 3.1 Web 端：分享（设为公开）
+
+**方法**：`shareAction()`，位置：`src/Controller/EntryController.php:538-556`
+**路由**：`POST /share/{id}`（路由名：`share`）
+**权限**：`#[IsGranted('SHARE', subject: 'entry')]` → `src/Controller/EntryController.php:539`
+
+**逻辑**：
+1. CSRF token 校验（`share-entry`）→ `src/Controller/EntryController.php:542`
+2. 如果 `uid` 为 null，则调用 `$entry->generateUid()` 生成公开链接 → `src/Controller/EntryController.php:546-547`
+3. 已经是公开状态则不重复生成（幂等）
+4. `persist + flush` 保存
+5. 跳转到公开分享页 `share_entry`
+
+### 3.2 Web 端：取消分享（设为私有）
+
+**方法**：`deleteShareAction()`，位置：`src/Controller/EntryController.php:564-579`
+**路由**：`POST /share/delete/{id}`（路由名：`delete_share`）
+**权限**：`#[IsGranted('UNSHARE', subject: 'entry')]` → `src/Controller/EntryController.php:564`
+
+**逻辑**：
+1. CSRF token 校验（`delete-share`）→ `src/Controller/EntryController.php:567`
+2. 调用 `$entry->cleanUid()` 清除 uid → `src/Controller/EntryController.php:571`
+3. `persist + flush` 保存
+4. 跳转到条目详情页 `view`
+
+### 3.3 Web 端：公开访问（只读）
+
+**方法**：`shareEntryAction()`，位置：`src/Controller/EntryController.php:588-608`
+**路由**：`GET /share/{uid}`（路由名：`share_entry`）
+**权限**：`#[IsGranted('PUBLIC_ACCESS')]` → `src/Controller/EntryController.php:588`（公开访问，无需登录）
+
+**注意**：这是只读的公开页面，不是状态切换入口，但它是公开状态的消费端。
+
+### 3.4 API 端：创建时设置 public
+
+**方法**：`postEntriesAction()`，位置：`src/Controller/Api/EntryRestController.php:717-811`
+**路由**：`POST /api/entries.{_format}`（路由名：`api_post_entries`）
+**全局权限**：`#[IsGranted('CREATE_ENTRIES')]`
+**参数**：`public`（query 参数，值为 `"1"` 或 `"0"`）
+
+**public 处理逻辑**：`src/Controller/Api/EntryRestController.php:778-784`
+
+```php
+if (null !== $data['isPublic']) {
+    if (true === (bool) $data['isPublic'] && null === $entry->getUid()) {
+        $entry->generateUid();
+    } elseif (false === (bool) $data['isPublic']) {
+        $entry->cleanUid();
+    }
+}
+```
+
+**行为**：
+- `isPublic = true` 且 uid 为空 → `generateUid()`（设为公开）
+- `isPublic = true` 且 uid 已存在 → 不操作（幂等）
+- `isPublic = false` → `cleanUid()`（设为私有）
+- `isPublic = null` → 不操作
+
+### 3.5 API 端：修改时设置 public
+
+**方法**：`patchEntriesAction()`，位置：`src/Controller/Api/EntryRestController.php:940-1040`
+**路由**：`PATCH /api/entries/{entry}.{_format}`（路由名：`api_patch_entries`）
+**单条权限**：`#[IsGranted('EDIT', subject: 'entry')]` → `src/Controller/Api/EntryRestController.php:939`
+
+**public 处理逻辑**：`src/Controller/Api/EntryRestController.php:998-1004`
+
+与创建时完全相同的三分支逻辑：
+- `isPublic = true` 且 uid 为空 → `generateUid()`
+- `isPublic = false` → `cleanUid()`
+- `isPublic = null` → 不操作
+
+### 3.6 API 端：按 public 过滤列表
+
+**方法**：`getEntriesAction()`，位置：`src/Controller/Api/EntryRestController.php:314-406`
+**权限**：`#[IsGranted('LIST_ENTRIES')]`
+**参数**：`public`（query 参数）
+
+**解析**：`src/Controller/Api/EntryRestController.php:318` —— `$isPublic = ... (bool) $request->query->get('public')`
+**传入查询**：`src/Controller/Api/EntryRestController.php:337` —— 作为参数传给 `findEntries()`
+
+注意：这是查询过滤，不是状态切换。
+
+### 3.7 公开状态权限校验汇总
+
+| 入口 | 权限常量 | 位置 | 类型 |
+|------|---------|------|------|
+| Web 分享 | `SHARE` | `src/Controller/EntryController.php:539` | 单条权限 |
+| Web 取消分享 | `UNSHARE` | `src/Controller/EntryController.php:564` | 单条权限 |
+| Web 公开访问 | `PUBLIC_ACCESS` | `src/Controller/EntryController.php:588` | 公开访问 |
+| API 创建设置 public | `CREATE_ENTRIES` | （全局权限） | 全局权限 |
+| API 修改设置 public | `EDIT` | `src/Controller/Api/EntryRestController.php:939` | 单条权限 |
+| API 按 public 过滤 | `LIST_ENTRIES` | （全局权限） | 全局权限 |
+
+**Voter 中的常量定义**：
+- `SHARE`：`src/Security/Voter/EntryVoter.php:17`
+- `UNSHARE`：`src/Security/Voter/EntryVoter.php:18`
+- `EDIT`：`src/Security/Voter/EntryVoter.php:13`
+- `CREATE_ENTRIES`：`src/Security/Voter/MainVoter.php:12`
+- `LIST_ENTRIES`：`src/Security/Voter/MainVoter.php:11`
+
+---
+
+## 四、权限校验体系
+
+### 4.1 两层 Voter 架构
 
 项目有两个独立的 Voter，分别处理不同级别的权限。
 
-#### 3.1.1 MainVoter（全局操作权限）
+#### 4.1.1 MainVoter（全局操作权限）
 
 **文件**：`src/Security/Voter/MainVoter.php:1-49`
 **适用场景**：不需要具体主体（subject）的全局/批量操作
@@ -267,7 +392,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 所有这些权限最终都校验同一个条件：`$this->security->isGranted('ROLE_USER')`。
 
-#### 3.1.2 EntryVoter（单条目权限）
+#### 4.1.2 EntryVoter（单条目权限）
 
 **文件**：`src/Security/Voter/EntryVoter.php:1-55`
 **适用场景**：针对具体 Entry 实体的单条操作
@@ -299,7 +424,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 所有 14 个单条目权限的校验条件完全相同：`$user === $subject->getUser()` —— 当前用户必须是条目的所有者。
 
-### 3.2 批量操作中的权限校验模式
+### 4.2 批量操作中的权限校验模式
 
 #### 模式 A：Web 端 massAction
 
@@ -353,7 +478,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 - 权限失败静默跳过，容错性强但原子性差
 - 逐条 flush，性能较低
 
-### 3.3 权限校验粒度对比
+### 4.3 权限校验粒度对比
 
 | 操作类型 | Web 单条 | Web 批量 | API 单条 | API 批量 |
 |---------|---------|---------|---------|---------|
@@ -381,11 +506,11 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 ---
 
-## 四、三部分交叉引用对照表
+## 五、三部分交叉引用对照表
 
 以下表格将状态机、批量入口、权限失败处理三部分的对应点一一列出，每个引用均为独立的仓库相对路径，可直接跳转复核。
 
-### 4.1 Web 批量 toggle-read（归档切换）
+### 5.1 Web 批量 toggle-read（归档切换）
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -399,7 +524,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 权限常量定义（单条） | `src/Security/Voter/EntryVoter.php:13` | `EDIT` 常量 |
 | 权限校验逻辑 | `src/Security/Voter/EntryVoter.php:40-54` | 所有者校验 |
 
-### 4.2 Web 批量 toggle-star（星标切换）
+### 5.2 Web 批量 toggle-star（星标切换）
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -411,7 +536,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 单条权限校验 | `src/Controller/EntryController.php:108` | `$this->security->isGranted('EDIT', $entry)` |
 | 权限失败处理 | `src/Controller/EntryController.php:109` | 抛 `AccessDeniedException`，整体终止 |
 
-### 4.3 Web 批量 delete（删除）
+### 5.3 Web 批量 delete（删除）
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -421,7 +546,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 单条对比（正确） | `src/Controller/EntryController.php:499` | 单条使用 `#[IsGranted('DELETE', ...)]` |
 | 权限失败处理 | `src/Controller/EntryController.php:109` | 抛 `AccessDeniedException`，整体终止 |
 
-### 4.4 API 批量删除
+### 5.4 API 批量删除
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -433,7 +558,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 权限常量定义（全局） | `src/Security/Voter/MainVoter.php:16` | `DELETE_ENTRIES` 常量 |
 | 权限常量定义（单条） | `src/Security/Voter/EntryVoter.php:20` | `DELETE` 常量 |
 
-### 4.5 API 批量加标签
+### 5.5 API 批量加标签
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -443,7 +568,7 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 权限失败处理 | `src/Controller/Api/EntryRestController.php:1369` | if 判断静默跳过 |
 | flush 时机 | `src/Controller/Api/EntryRestController.php:1373` | 逐条 flush |
 
-### 4.6 API 批量删标签
+### 5.6 API 批量删标签
 
 | 维度 | 代码位置 | 说明 |
 |------|---------|------|
@@ -453,25 +578,90 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | 权限失败处理 | `src/Controller/Api/EntryRestController.php:1304` | if 判断静默跳过 |
 | flush 时机 | `src/Controller/Api/EntryRestController.php:1317` | 逐条 flush |
 
+### 5.7 Web 单条分享（设为公开）
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 状态机方法 | `src/Entity/Entry.php:767-773` | `generateUid()`，幂等生成 uid |
+| 入口方法 | `src/Controller/EntryController.php:538-556` | `shareAction()` |
+| 入口路由 | `src/Controller/EntryController.php:538` | `POST /share/{id}`，路由名 `share` |
+| 权限入口 | `src/Controller/EntryController.php:539` | `#[IsGranted('SHARE', subject: 'entry')]` |
+| 权限常量 | `src/Security/Voter/EntryVoter.php:17` | `SHARE` 常量 |
+| CSRF 校验 | `src/Controller/EntryController.php:542` | token id：`share-entry` |
+| 核心调用 | `src/Controller/EntryController.php:546-547` | `$entry->generateUid()` |
+| flush 时机 | `src/Controller/EntryController.php:550` | 单次 flush |
+
+### 5.8 Web 单条取消分享（设为私有）
+
+| 维度 | 代码位置 | 说明 |
+|------|---------|------|
+| 状态机方法 | `src/Entity/Entry.php:775-778` | `cleanUid()`，清除 uid |
+| 入口方法 | `src/Controller/EntryController.php:564-579` | `deleteShareAction()` |
+| 入口路由 | `src/Controller/EntryController.php:563` | `POST /share/delete/{id}`，路由名 `delete_share` |
+| 权限入口 | `src/Controller/EntryController.php:564` | `#[IsGranted('UNSHARE', subject: 'entry')]` |
+| 权限常量 | `src/Security/Voter/EntryVoter.php:18` | `UNSHARE` 常量 |
+| CSRF 校验 | `src/Controller/EntryController.php:567` | token id：`delete-share` |
+| 核心调用 | `src/Controller/EntryController.php:571` | `$entry->cleanUid()` |
+| flush 时机 | `src/Controller/EntryController.php:574` | 单次 flush |
+
+### 5.9 API 单条设置 public（创建 & 修改）
+
+| 维度 | 代码位置（创建） | 代码位置（修改） | 说明 |
+|------|----------------|----------------|------|
+| 状态机方法 | `src/Entity/Entry.php:767-773` | `src/Entity/Entry.php:775-778` | `generateUid()` / `cleanUid()` |
+| 入口方法 | `src/Controller/Api/EntryRestController.php:717-811` | `src/Controller/Api/EntryRestController.php:940-1040` | POST 创建 / PATCH 修改 |
+| 路由名 | `api_post_entries` | `api_patch_entries` | |
+| 全局权限 | `#[IsGranted('CREATE_ENTRIES')]` | — | 创建用全局权限 |
+| 单条权限 | — | `src/Controller/Api/EntryRestController.php:939` | 修改用 `EDIT` 单条权限 |
+| public 处理 | `src/Controller/Api/EntryRestController.php:778-784` | `src/Controller/Api/EntryRestController.php:998-1004` | 三分支逻辑完全相同 |
+| 参数名 | `isPublic`（来自 `public` query 参数） | `isPublic`（来自 `public` query 参数） | |
+| 权限失败 | 401/403 | 401/403 | 标准 HTTP 错误，不会静默跳过 |
+
 ---
 
-## 五、不统一点汇总（快速索引）
+## 六、不统一点汇总（快速索引）
 
-### 5.1 状态切换方法不一致
+### 6.1 状态切换方法不一致
 
-| 场景 | 归档方法 | 星标方法 | 星标时间戳 |
-|------|---------|---------|-----------|
-| Web 单条归档 | `toggleArchive()` | - | - |
-| Web 单条星标 | - | `toggleStar()` + `updateStar()` | ✅ 更新 |
-| Web 批量 toggle-read | `toggleArchive()` | - | - |
-| Web 批量 toggle-star | - | `toggleStar()` | ❌ 不更新 |
-| API PATCH 单条 | `updateArchived()` | `updateStar()` | ✅ 更新 |
-| API POST 创建 | `updateArchived()` | `updateStar()` | ✅ 更新 |
+| 场景 | 归档方法 | 星标方法 | 公开方法 | 星标时间戳 | 公开时间戳 |
+|------|---------|---------|---------|-----------|-----------|
+| Web 单条 | `toggleArchive()` | `toggleStar()` + `updateStar()` | `generateUid()` / `cleanUid()` | ✅ 更新 | —（无） |
+| Web 批量 | `toggleArchive()` | `toggleStar()` | —（无批量） | ❌ 不更新 | — |
+| API POST 创建 | `updateArchived()` | `updateStar()` | `generateUid()` / `cleanUid()` | ✅ 更新 | —（无） |
+| API PATCH 修改 | `updateArchived()` | `updateStar()` | `generateUid()` / `cleanUid()` | ✅ 更新 | —（无） |
 
-**核心问题**：Web 批量切换星标时 `starredAt` 不更新。
+**核心问题 1**：Web 批量切换星标时 `starredAt` 不更新。
 **Bug 位置**：`src/Controller/EntryController.php:115`
 
-### 5.2 权限失败处理不一致
+**核心问题 2**：公开状态完全没有时间戳字段（没有 `publicAt` 之类的字段），无法追踪何时设为公开。
+
+### 6.2 状态机设计不对称
+
+| 维度 | 归档 | 星标 | 公开 |
+|------|------|------|------|
+| 是否有 toggle 方法 | ✅ `toggleArchive()` | ✅ `toggleStar()` | ❌ 无 toggle |
+| 是否有时间戳 | ✅ `archivedAt` | ✅ `starredAt` | ❌ 无时间戳 |
+| 是否有 updateXxx 方法 | ✅ `updateArchived()` | ✅ `updateStar()` | ❌ 无对应方法 |
+| 状态字段 | bool 字段 `isArchived` | bool 字段 `isStarred` | 派生自 `uid` |
+
+公开状态的特殊性：
+- 由 `uid` 是否为 null 派生，不是独立布尔字段
+- 设为公开用 `generateUid()`，设为私有用 `cleanUid()`，不是对称的方法名
+- 没有「切换」语义的方法（toggle）
+
+### 6.3 批量操作覆盖度不一致
+
+| 操作类型 | Web 批量 | API 批量 |
+|---------|---------|---------|
+| 切换归档 | ✅ `toggle-read` | ❌ 无 |
+| 切换星标 | ✅ `toggle-star` | ❌ 无 |
+| 删除 | ✅ `delete` | ✅ `DELETE /api/entries/list` |
+| 标签操作 | ✅ `tag` | ✅ 加标签 / 删标签 |
+| 切换公开 | ❌ 无 | ❌ 无 |
+
+**关键发现**：API 端完全没有「批量切换归档/星标」接口，Web 端完全没有「批量切换公开」接口。三个状态的批量操作覆盖度都不完整。
+
+### 6.4 权限失败处理不一致
 
 | 接口 | 权限失败行为 | 代码位置 |
 |------|-------------|---------|
@@ -480,29 +670,29 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 | API 批量加标签 | 静默跳过，继续处理 | `src/Controller/Api/EntryRestController.php:1369` |
 | API 批量删标签 | 静默跳过，继续处理 | `src/Controller/Api/EntryRestController.php:1304` |
 
-### 5.3 权限粒度不一致
+### 6.5 权限粒度不一致
 
 - Web 批量统一用 `EDIT` 权限（粒度过粗）
 - API 批量用对应操作权限（粒度较细）
 
-### 5.4 flush 时机不一致
+### 6.6 flush 时机不一致
 
 - Web 批量：循环结束后一次 flush（`src/Controller/EntryController.php:129`）
 - API 批量：逐条 flush（性能较低）
 
-### 5.5 标识方式不一致
+### 6.7 标识方式不一致
 
 - Web 批量：条目 ID 数组（`entry-checkbox`）
 - API 批量：URL 数组（JSON）
 
-### 5.6 数量限制不一致
+### 6.8 数量限制不一致
 
 - API 批量创建：受 `apiLimitMassActions` 限制（`src/Controller/Api/EntryRestController.php:542`）
 - Web 批量及其他 API 批量：无显式数量限制
 
 ---
 
-## 六、代码文件索引
+## 七、代码文件索引
 
 | 文件 | 仓库相对路径（可跳转） | 说明 |
 |------|----------------------|------|
