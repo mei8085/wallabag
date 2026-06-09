@@ -78,49 +78,66 @@ return match ($attribute) {
 
 ---
 
-## 三、CREATE_ENTRIES 与 EDIT 权限控制对比
+## 三、三条 API 路径的权限关系分析
 
-### 3.1 两层权限体系
+### 3.1 三条路径总览
 
-项目对 Entry 操作的权限控制分为**两个层级**，分别由不同 Voter 负责：
+Entry API 有三条核心路径，分别对应不同的权限属性和投票器：
 
-| 权限属性 | 所属 Voter | subject | 判定逻辑 | 适用场景 |
-|---------|-----------|---------|---------|---------|
-| `LIST_ENTRIES` / `CREATE_ENTRIES` 等 `*_ENTRIES` | MainVoter | 无 | `ROLE_USER` 角色 | 创建条目、列表查询、批量操作等全局操作 |
-| `EDIT` / `VIEW` / `DELETE` 等 | EntryVoter | Entry 实例 | 必须是所有者 | 对具体条目的读写删 |
+| 路径 | 路由 | 权限属性 | 所属 Voter | subject | 是否修改 uid |
+|------|------|---------|-----------|---------|-------------|
+| 列表查询 | `GET /api/entries` | `LIST_ENTRIES` | MainVoter | 无 | ❌ 只读 |
+| 创建/更新（按 URL） | `POST /api/entries` | `CREATE_ENTRIES` | MainVoter | 无 | ✅ 通过 `public` 参数 |
+| 更新（按 ID） | `PATCH /api/entries/{entry}` | `EDIT` | EntryVoter | Entry 实例 | ✅ 通过 `public` 参数 |
 
-### 3.2 CREATE_ENTRIES 的职责范围
+**关键区分**：
+- `LIST_ENTRIES` / `CREATE_ENTRIES` 走 **MainVoter**（无 subject，基于角色）
+- `EDIT` 走 **EntryVoter**（有 Entry subject，基于归属判定）
 
-[MainVoter.php:L42-L48](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Security/Voter/MainVoter.php#L42-L48) 中：
+---
+
+### 3.2 GET /api/entries — LIST_ENTRIES 路径
+
+**代码位置**：[EntryRestController.php:L312-L379](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L312-L379)
 
 ```php
-self::LIST_ENTRIES, self::CREATE_ENTRIES, self::EDIT_ENTRIES, 
-self::EXPORT_ENTRIES, self::IMPORT_ENTRIES, self::DELETE_ENTRIES, ...
-    => $this->security->isGranted('ROLE_USER'),
+#[Route(path: '/api/entries.{_format}', name: 'api_get_entries', methods: ['GET'])]
+#[IsGranted('LIST_ENTRIES')]
+public function getEntriesAction(Request $request, EntryRepository $entryRepository)
 ```
 
-所有 `*_ENTRIES` 类权限的判定逻辑完全相同——只要有 `ROLE_USER` 角色就通过。
+**权限路径**：
+1. `#[IsGranted('LIST_ENTRIES')]` → MainVoter → 检查 `ROLE_USER` 角色
+2. 业务逻辑：`$entryRepository->findEntries($this->getUser()->getId(), ...)`
+3. 查询时限定 `userId = 当前用户`，天然数据隔离
 
-**使用 `CREATE_ENTRIES` 的接口**：
+**与 public/uid 的关系**：
+- 请求参数 `public` 仅作为**过滤条件**（[L318](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L318)）
+- 不修改 uid，只用于筛选"已公开/未公开"的条目
+- 因为查询已限定 userId，所以只能看到自己条目的公开状态
 
-| 接口 | 路由 | 说明 |
-|------|------|------|
-| Web 新建 | `GET/POST /new-entry` | [EntryController.php:L170-L172](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/EntryController.php#L170-L172) |
-| API 创建 | `POST /api/entries` | [EntryRestController.php:L715-L717](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L715-L717) |
-| API 批量创建 | `POST /api/entries/lists` | [EntryRestController.php:L536-L538](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L536-L538) |
-| API 列表查询 | `GET /api/entries` | [EntryRestController.php:L312-L314](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L312-L314) |
+---
 
-### 3.3 POST /api/entries 的 upsert 语义——边界点
+### 3.3 POST /api/entries — CREATE_ENTRIES 路径
 
-**重要发现**：`POST /api/entries` 并非纯"创建"接口，而是 **upsert**（存在则更新）语义。
-
-[EntryRestController.php:L728-L736](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L728-L736)：
+**代码位置**：[EntryRestController.php:L715-L811](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L715-L811)
 
 ```php
-$entry = $entryRepository->findByUrlAndUserId(
-    $url,
-    $this->getUser()->getId()
-);
+#[Route(path: '/api/entries.{_format}', name: 'api_post_entries', methods: ['POST'])]
+#[IsGranted('CREATE_ENTRIES')]
+public function postEntriesAction(...)
+```
+
+#### 3.3.1 权限路径
+
+1. `#[IsGranted('CREATE_ENTRIES')]` → MainVoter → 检查 `ROLE_USER` 角色
+2. **没有**使用 `EDIT` 或 `SHARE` 权限
+3. 业务层通过 `findByUrlAndUserId($url, $this->getUser()->getId())` 确保数据隔离（[L728-L731](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L728-L731)）
+
+#### 3.3.2 Upsert 语义
+
+```php
+$entry = $entryRepository->findByUrlAndUserId($url, $this->getUser()->getId());
 
 if (false === $entry) {
     $entry = new Entry($this->getUser());
@@ -128,46 +145,84 @@ if (false === $entry) {
 }
 ```
 
-**权限与数据安全分析**：
-- 权限检查只用了 `CREATE_ENTRIES`（MainVoter → ROLE_USER），没有用 `EDIT`
-- 但查询时限定了 `userId = 当前用户`，所以只能查到自己的条目
-- 因此即使是"更新已存在的条目"，也不会越权——因为只能更新自己的
+- 按 URL + 用户 ID 查找已存在的条目
+- 存在则更新，不存在则创建
+- 因为限定了 userId，所以只会更新自己的条目，不会越权
 
-### 3.4 EDIT 权限的职责范围
+#### 3.3.3 public/uid 修改逻辑
 
-`EDIT` 及同类属性（VIEW/DELETE/STAR/ARCHIVE 等）都由 EntryVoter 管辖，必须提供 Entry 实例作为 subject。
+[EntryRestController.php:L778-L784](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L778-L784)：
 
-**使用 `EDIT` / 同类权限的接口**：
-
-| 接口 | 路由 | 权限属性 |
-|------|------|---------|
-| Web 查看 | `GET /view/{id}` | `VIEW` |
-| Web 编辑 | `GET/POST /edit/{id}` | `EDIT` |
-| API 单条查询 | `GET /api/entries/{id}` | `VIEW` |
-| API 更新 | `PATCH /api/entries/{id}` | `EDIT` |
-| API 删除 | `DELETE /api/entries/{id}` | `DELETE` |
-| API 重新抓取 | `PATCH /api/entries/{id}/reload` | `RELOAD` |
-
-### 3.5 两层权限如何配合
-
-以 API 创建接口为例，完整的安全链路：
-
+```php
+if (null !== $data['isPublic']) {
+    if (true === (bool) $data['isPublic'] && null === $entry->getUid()) {
+        $entry->generateUid();
+    } elseif (false === (bool) $data['isPublic']) {
+        $entry->cleanUid();
+    }
+}
 ```
-请求到达
-   │
-   ▼
-Firewall 认证（OAuth token / Session）
-   │
-   ▼
-#[IsGranted('CREATE_ENTRIES')]  → MainVoter → ROLE_USER?
-   │
-   ▼
-业务逻辑：按 url + userId 查找条目
-   │  （限定 userId = 当前用户，天然隔离）
-   ▼
-不存在 → 创建新条目（归属当前用户）
-存在   → 更新已有条目（必然是自己的）
+
+| 输入 `isPublic` | 当前 uid 状态 | 结果 |
+|----------------|-------------|------|
+| `true` / `1` | 为 null | 生成新 uid |
+| `true` / `1` | 已存在 | **不重新生成**，保持原值 |
+| `false` / `0` | 任何状态 | 清空 uid |
+| `null` / 不传 | 任何状态 | **不做任何修改** |
+
+---
+
+### 3.4 PATCH /api/entries/{entry} — EDIT 路径
+
+**代码位置**：[EntryRestController.php:L938-L1025](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L938-L1025)
+
+```php
+#[Route(path: '/api/entries/{entry}.{_format}', name: 'api_patch_entries', methods: ['PATCH'])]
+#[IsGranted('EDIT', subject: 'entry')]
+public function patchEntriesAction(Entry $entry, ...)
 ```
+
+#### 3.4.1 权限路径
+
+1. `{entry}` 参数由 Doctrine ParamConverter 按 ID 自动查找 Entry 实例
+2. `#[IsGranted('EDIT', subject: 'entry')]` → EntryVoter → 归属判定
+3. 必须是条目所有者才能通过，否则直接 403
+
+#### 3.4.2 public/uid 修改逻辑
+
+[EntryRestController.php:L998-L1004](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Controller/Api/EntryRestController.php#L998-L1004)：
+
+```php
+if (null !== $data['isPublic']) {
+    if (true === (bool) $data['isPublic'] && null === $entry->getUid()) {
+        $entry->generateUid();
+    } elseif (false === (bool) $data['isPublic']) {
+        $entry->cleanUid();
+    }
+}
+```
+
+**代码与 POST 路径完全相同**，行为矩阵也一致。
+
+---
+
+### 3.5 CREATE_ENTRIES 路径 vs EDIT 路径对比
+
+| 维度 | POST /api/entries（CREATE_ENTRIES） | PATCH /api/entries/{entry}（EDIT） |
+|------|-------------------------------------|------------------------------------|
+| 权限属性 | `CREATE_ENTRIES` | `EDIT` |
+| 所属 Voter | MainVoter | EntryVoter |
+| subject | 无 | Entry 实例 |
+| 判定方式 | `ROLE_USER` 角色检查 | 归属判定（`$user === $entry->getUser()`） |
+| 标识条目方式 | URL + userId（业务层查询） | 路径参数 `{entry}`（ParamConverter） |
+| 数据隔离方式 | 业务层查询限定 userId | 投票器层归属校验 |
+| 是否修改 uid | 是（通过 `public` 参数） | 是（通过 `public` 参数） |
+| uid 修改逻辑 | 完全相同 | 完全相同 |
+| 能否操作他人条目 | 不能（查询限定了自己） | 不能（EntryVoter 拒绝） |
+
+**两条路径的安全效果等价**：都只能操作自己的条目。但实现方式不同：
+- POST 路径靠**业务层查询过滤**（隐性安全）
+- PATCH 路径靠**投票器层归属判定**（显性安全）
 
 ---
 
@@ -527,9 +582,11 @@ EntryVoter 对所有 14 种操作使用完全相同的判定逻辑——只要�
 
 ### 8.5 CREATE_ENTRIES 与 EDIT 的分工
 
-- `CREATE_ENTRIES`（MainVoter）：回答"**能不能创建条目**"，基于角色
-- `EDIT`（EntryVoter）：回答"**能不能修改这条特定的条目**"，基于归属
-- 创建接口的 upsert 语义不会导致越权，因为查询时限定了 `userId = 当前用户`
+- `LIST_ENTRIES` / `CREATE_ENTRIES` 等 `*_ENTRIES`（MainVoter）：回答"**能不能做某类操作**"，基于角色，无 subject
+- `EDIT` / `VIEW` / `DELETE` 等（EntryVoter）：回答"**能不能操作这条特定的条目**"，基于归属，有 Entry subject
+- POST /api/entries（CREATE_ENTRIES）的 upsert 语义不会导致越权，因为查询时限定了 `userId = 当前用户`
+- PATCH /api/entries/{entry}（EDIT）走 EntryVoter 归属判定，天然只有所有者能操作
+- 两条路径都支持 `public` 参数控制 uid，但权限路径完全不同
 
 ---
 
