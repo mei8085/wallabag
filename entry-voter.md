@@ -318,7 +318,7 @@ if (null !== $data['isPublic']) {
 | `public=0` | 任何状态 | 清空 uid |
 | 不传 public | 任何状态 | **不做任何修改** |
 
-### 4.3 uid 生成算法
+### 4.4 uid 生成算法
 
 [Entry.php:L767-L773](file:///d:/fz/0508-2/solo-dogfeeding/code/110-wallabag/src/Entity/Entry.php#L767-L773)：
 
@@ -603,8 +603,10 @@ EntryVoter 对所有 14 种操作使用完全相同的判定逻辑——只要�
 | 匿名用户访问共享链接（开关关） | 业务逻辑 | share_public = 0 | 拒绝（403） |
 | 访问不存在的 uid | ParamConverter | 数据库查不到 | 拒绝（404） |
 | 所有者开启/关闭共享 | EntryVoter | 必须是所有者 | 允许/拒绝 |
-| API 设置 public=1 生成 uid | EntryVoter（EDIT） | 必须是所有者 + uid 为空才生成 | 允许 |
-| API 设置 public=0 清理 uid | EntryVoter（EDIT） | 必须是所有者 | 允许 |
+| API POST 设置 public=1 生成 uid | MainVoter + 业务层查询 | `CREATE_ENTRIES` 权限 + `findByUrlAndUserId` 限定自己的条目 | 允许 |
+| API POST 设置 public=0 清理 uid | MainVoter + 业务层查询 | `CREATE_ENTRIES` 权限 + `findByUrlAndUserId` 限定自己的条目 | 允许 |
+| API PATCH 设置 public=1 生成 uid | EntryVoter（EDIT） | 必须是所有者 + uid 为空才生成 | 允许 |
+| API PATCH 设置 public=0 清理 uid | EntryVoter（EDIT） | 必须是所有者 | 允许 |
 | 通过 feedToken 获取列表 | UsernameFeedTokenConverter | username + feedToken 匹配 | 允许（只读列表） |
 | feedToken 错误或已撤销 | UsernameFeedTokenConverter | 查不到用户 | 拒绝（404） |
 | feedToken 为 null（未生成） | UsernameFeedTokenConverter | 查不到用户 | 拒绝（404） |
