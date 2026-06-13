@@ -260,183 +260,154 @@ CREATE TABLE oauth2_access_tokens (
 
 ---
 
-## 三、越权访问为何表现为 404 而非 403
+## 三、越权访问为何表现为 404——两条不同的产生路径
 
-这是 Wallabag 安全设计中非常精妙的一点——通过**异常转换**隐藏资源存在性。
+越权访问在 Wallabag 中统一返回 404，但底层存在**两条截然不同的产生路径**，不可混为一谈：
 
-### 3.1 现象描述（纯越权场景证据）
+| 路径 | 机制 | 适用场景 | 404 来源 |
+|------|------|---------|---------|
+| **路径 A** | 按当前用户作用域查询，查不到 → 直接抛 NotFoundHttpException | 标签 API（按 ID/标签名删除） | 资源在用户的作用域内确实不存在 |
+| **路径 B** | ParamConverter 按 ID 加载实体 → Voter 拒绝 → AccessDeniedToNotFoundSubscriber 将 403 改写为 404 | 条目 API、标注 API、标签规则 Web 接口 | 资源存在但被伪装为不存在 |
 
-以下所有测试均为**真正的越权场景**：资源真实存在，且属于另一个用户，但当前认证用户访问时返回 404。
+---
 
-#### 证据 1：API 越权读取他人条目
+### 3.1 路径 A：作用域查询查不到 → 直接返回 404
 
-**功能测试**：[tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113)
+**核心特征**：控制器主动以当前用户 ID 为条件查询数据库，若查不到结果则直接 `throw $this->createNotFoundException()`。从未触发 Voter，也未经异常转换——资源在当前用户的数据作用域内就是查不到。
+
+#### 典型代码：标签 API 按标签名删除
+
+[src/Controller/Api/TagRestController.php#L67-L88](src/Controller/Api/TagRestController.php#L67-L88)
 
 ```php
-public function testGetOneEntryWrongUser(): void
+public function deleteTagLabelAction(Request $request, TagRepository $tagRepository, EntryRepository $entryRepository)
 {
-    // 获取属于 bob 的一条真实存在的记录
-    $entry = $this->client->getContainer()
-        ->get(EntityManagerInterface::class)
-        ->getRepository(Entry::class)
-        ->findOneBy(['user' => $this->getUserId('bob'), 'isArchived' => false]);
+    $this->validateAuthentication();
+    $label = $request->request->get('tag', $request->query->get('tag', ''));
 
-    // 使用 admin 用户（而非 bob）请求访问 bob 的条目
-    $this->client->request('GET', '/api/entries/' . $entry->getId() . '.json');
+    // ★ 以当前用户 ID 为条件查询标签
+    $tags = $tagRepository->findByLabelsAndUser([$label], $this->getUser()->getId());
 
-    // 条目存在但返回 404（非 403）
-    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
+    if (empty($tags)) {
+        // ★ 在当前用户的作用域内查不到此标签 → 直接抛 NotFoundHttpException
+        throw $this->createNotFoundException('Tag not found');
+    }
+    // ... 执行删除
 }
 ```
 
-#### 证据 2：Web 界面越权读取他人条目
-
-**功能测试**：[tests/functional/Controller/EntryControllerTest.php#L784-L797](tests/functional/Controller/EntryControllerTest.php#L784-L797)
+**关键查询方法**：[src/Repository/TagRepository.php#L121-L136](src/Repository/TagRepository.php#L121-L136)
 
 ```php
-public function testViewOtherUserEntry(): void
+public function findByLabelsAndUser($labels, $userId)
 {
-    $this->logInAs('admin');
-    $client = $this->getTestClient();
+    $qb = $this->getQueryBuilderByUser($userId)   // ★ LEFT JOIN entry WHERE e.user = :userId
+        ->select('t.id');
 
-    // 获取属于 bob 的一条真实存在的记录
-    $content = $client->getContainer()
-        ->get(EntityManagerInterface::class)
-        ->getRepository(Entry::class)
-        ->findOneByUsernameAndNotArchived('bob');
-
-    // admin 访问 bob 的条目
-    $client->request('GET', '/view/' . $content->getId());
-
-    // 条目存在但返回 404（非 403）
-    $this->assertSame(404, $client->getResponse()->getStatusCode());
+    $ids = $qb->andWhere($qb->expr()->in('t.label', $labels))
+        ->getQuery()
+        ->getArrayResult();
+    // ...
 }
 ```
 
-#### 证据 3：API 越权删除他人标签
+**`getQueryBuilderByUser` 过滤条件**：[src/Repository/TagRepository.php#L177-L184](src/Repository/TagRepository.php#L177-L184)
 
-**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81)
+```php
+private function getQueryBuilderByUser($userId)
+{
+    return $this->createQueryBuilder('t')
+        ->leftJoin('t.entries', 'e')
+        ->where('e.user = :userId')->setParameter('userId', $userId)  // ★ 强制按用户过滤
+        ->groupBy('t.id')
+        ->orderBy('t.slug');
+}
+```
+
+**执行时序**：
+
+```
+DELETE /api/tag/label.json?tag=bob   （admin 用户请求删除属于 bob 的标签 "bob"）
+    │
+    ▼
+1. TagRepository::findByLabelsAndUser(['bob'], admin.id)
+   → SELECT t.id FROM tag t LEFT JOIN entry e ON ... WHERE e.user = admin.id AND t.label = 'bob'
+   → 结果为空（bob 的标签不挂在 admin 的条目下）
+    │
+    ▼
+2. empty($tags) === true
+    │
+    ▼
+3. throw $this->createNotFoundException('Tag not found')   ★ 直接 404，未经 Voter，未经异常转换
+    │
+    ▼
+4. 返回 404 Not Found
+```
+
+**同样模式的标签 API**：按标签 ID 删除
+
+[src/Controller/Api/TagRestController.php#L160-L178](src/Controller/Api/TagRestController.php#L160-L178)
+
+```php
+public function deleteTagAction(Tag $tag, TagRepository $tagRepository, EntryRepository $entryRepository)
+{
+    $this->validateAuthentication();
+
+    // ★ 虽然 ParamConverter 已加载 Tag 对象，但仍按当前用户作用域重新查询
+    $tagFromDb = $tagRepository->findByLabelsAndUser([$tag->getLabel()], $this->getUser()->getId());
+
+    if (empty($tagFromDb)) {
+        // ★ 当前用户作用域内无此标签 → 直接抛 NotFoundHttpException
+        throw $this->createNotFoundException('Tag not found');
+    }
+    // ... 执行删除
+}
+```
+
+**注意**：此方法中 ParamConverter 已按 ID 加载了 Tag 对象（无论属于哪个用户），但控制器**不信任** ParamConverter 的加载结果，而是**再次按当前用户作用域查询**。这相当于在控制器层做了一次显式的数据隔离检查。
+
+#### 功能测试证据
+
+**证据 A1：按 ID 删除他人标签 → 404**
+
+[tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81)
 
 ```php
 public function testDeleteOtherUserTag(): void
 {
     $em = $this->client->getContainer()->get(EntityManagerInterface::class);
-    // 标签属于另一个用户（bob）
     $tag = $em->getRepository(Tag::class)->findOneByLabel($this->otherUserTagLabel);
 
-    // 当前认证用户（admin）删除 bob 的标签
     $this->client->request('DELETE', '/api/tags/' . $tag->getId() . '.json');
 
-    // 标签存在但返回 404（非 403）
+    // 标签在 admin 作用域内查不到 → 直接 404
     $this->assertSame(404, $this->client->getResponse()->getStatusCode());
 }
 ```
 
-#### 证据 4：API 越权通过标签名删除他人标签
+**证据 A2：按标签名删除他人标签 → 404**
 
-**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147)
+[tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147)
 
 ```php
 public function testDeleteTagByLabelOtherUser(): void
 {
-    // otherUserTagLabel 属于另一个用户（bob）
     $this->client->request('DELETE', '/api/tag/label.json', ['tag' => $this->otherUserTagLabel]);
 
-    // 标签存在但返回 404（非 403）
+    // 标签在 admin 作用域内查不到 → 直接 404
     $this->assertSame(404, $this->client->getResponse()->getStatusCode());
 }
 ```
 
-#### 证据 5：API 越权获取他人条目标注
+---
 
-**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L69-L86](tests/functional/Controller/AnnotationControllerTest.php#L69-L86)
+### 3.2 路径 B：Voter 拒绝访问 → 异常转换伪装为 404
 
-```php
-public function testGetAnnotationsFromAnOtherUser($prefixUrl): void
-{
-    // 获取另一个用户（bob）的条目
-    $otherUser = $em->getRepository(User::class)->findOneByUserName('bob');
-    $entry = $em->getRepository(Entry::class)
-        ->findByUrlAndUserId('http://0.0.0.0/entry3', $otherUser->getId());
+**核心特征**：ParamConverter 按 ID 无条件加载实体（不区分用户），`#[IsGranted]` 注解触发 Voter 校验所有权，Voter 投出 ACCESS_DENIED 后抛出 `AccessDeniedHttpException`（原生 403），随后被 `AccessDeniedToNotFoundSubscriber` 全局事件订阅器改写为 `NotFoundHttpException`（404）。
 
-    // 当前用户请求获取 bob 的条目标注
-    $this->client->request('GET', $prefixUrl . '/' . $entry->getId() . '.json');
+#### 异常转换核心组件
 
-    // 条目存在但返回 404（非 403）
-    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
-}
-```
-
-#### 证据 6：API 越权编辑他人标注
-
-**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L271-L291](tests/functional/Controller/AnnotationControllerTest.php#L271-L291)
-
-```php
-public function testEditAnnotationFromAnOtherUser($prefixUrl): void
-{
-    // 获取另一个用户（bob）的标注
-    $otherUser = $em->getRepository(User::class)->findOneByUserName('bob');
-    $entry = $em->getRepository(Entry::class)
-        ->findByUrlAndUserId('http://0.0.0.0/entry3', $otherUser->getId());
-    $annotation = $em->getRepository(Annotation::class)
-        ->findLastAnnotationByUserId($entry->getId(), $otherUser->getId());
-
-    // 当前用户编辑 bob 的标注
-    $this->client->request('PUT', $prefixUrl . '/' . $annotation->getId() . '.json',
-        [], [], $headers, $content);
-
-    // 标注存在但返回 404（非 403）
-    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
-}
-```
-
-#### 证据 7：Web 越权删除他人标签规则
-
-**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L577-L591](tests/functional/Controller/ConfigControllerTest.php#L577-L591)
-
-```php
-public function testDeletingTaggingRuleFromAnOtherUser(): void
-{
-    $this->logInAs('bob');  // bob 登录
-    $client = $this->getTestClient();
-    // 第一条规则默认属于 admin（另一个用户）
-    $rule = $client->getContainer()->get(EntityManagerInterface::class)
-        ->getRepository(TaggingRule::class)->findAll()[0];
-
-    // bob 删除 admin 的规则
-    $crawler = $client->request('POST', '/tagging-rule/delete/' . $rule->getId());
-
-    // 规则存在但返回 404（非 403）
-    $this->assertSame(404, $client->getResponse()->getStatusCode());
-    $this->assertStringContainsString('404: Not Found', $body[0]);
-}
-```
-
-#### 证据 8：Web 越权编辑他人标签规则
-
-**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L593-L607](tests/functional/Controller/ConfigControllerTest.php#L593-L607)
-
-```php
-public function testEditingTaggingRuleFromAnOtherUser(): void
-{
-    $this->logInAs('bob');
-    $client = $this->getTestClient();
-    // 第一条规则默认属于 admin（另一个用户）
-    $rule = $client->getContainer()->get(EntityManagerInterface::class)
-        ->getRepository(TaggingRule::class)->findAll()[0];
-
-    // bob 访问 admin 的规则编辑页
-    $crawler = $client->request('GET', '/tagging-rule/edit/' . $rule->getId());
-
-    // 规则存在但返回 404（非 403）
-    $this->assertSame(404, $client->getResponse()->getStatusCode());
-    $this->assertStringContainsString('404: Not Found', $body[0]);
-}
-```
-
-### 3.2 核心机制：AccessDeniedToNotFoundSubscriber
-
-**异常转换事件订阅器**：[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
+[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
 
 ```php
 class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
@@ -444,7 +415,7 @@ class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
     public static function getSubscribedEvents(): array
     {
         return [
-            KernelEvents::EXCEPTION => 'onKernelException',  // ★ 监听异常事件
+            KernelEvents::EXCEPTION => 'onKernelException',
         ];
     }
 
@@ -453,7 +424,7 @@ class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
         $exception = $event->getThrowable();
 
         if ($exception instanceof AccessDeniedHttpException) {
-            // ★ 将 403 异常替换为 404 异常 ★
+            // ★ 将 403 异常替换为 404 异常
             $notFoundException = new NotFoundHttpException('', $exception);
             $event->setThrowable($notFoundException);
         }
@@ -461,72 +432,286 @@ class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
 }
 ```
 
-### 3.3 完整时序：越权单条目的执行流程
+#### 典型代码：条目 API 越权访问
 
-以 `GET /api/entries/123` 为例（用户 A 访问属于用户 B 的条目 123，且条目 123 真实存在于数据库中）：
+[src/Controller/Api/EntryRestController.php#L405-L407](src/Controller/Api/EntryRestController.php#L405-L407)
+
+```php
+#[Route(path: '/api/entries/{entry}.{_format}', name: 'api_get_entry', methods: ['GET'])]
+#[IsGranted('VIEW', subject: 'entry')]   // ★ 触发 EntryVoter
+public function getEntryAction(Entry $entry)
+```
+
+**EntryVoter 所有权校验**：[src/Security/Voter/EntryVoter.php#L40-L54](src/Security/Voter/EntryVoter.php#L40-L54)
+
+```php
+protected function voteOnAttribute(string $attribute, $subject, TokenInterface $token): bool
+{
+    \assert($subject instanceof Entry);
+    $user = $token->getUser();
+    if (!$user instanceof User) {
+        return false;
+    }
+    return match ($attribute) {
+        self::VIEW, self::EDIT, ...
+            => $user === $subject->getUser(),  // ★ 当前用户 !== 条目所有者 → false
+        default => false,
+    };
+}
+```
+
+**执行时序**：
 
 ```
-步骤 1: ParamConverter 加载 Entry
-─────────────────────────────────────────
-[src/Controller/Api/EntryRestController.php#L405-L407]
-    #[Route(path: '/api/entries/{entry}.{_format}', ...)]
-    #[IsGranted('VIEW', subject: 'entry')]
-    public function getEntryAction(Entry $entry)
-
-↓ Symfony SensioFrameworkExtraBundle 的 DoctrineParamConverter 自动执行:
-  SELECT * FROM entry WHERE id = 123
-  → 找到记录（虽然属于用户 B），注入 $entry 对象
-
-步骤 2: #[IsGranted] 触发 EntryVoter 检查
-─────────────────────────────────────────
-[src/Security/Voter/EntryVoter.php#L40-L54]
-    protected function voteOnAttribute(string $attribute, $subject, TokenInterface $token): bool
-    {
-        $user = $token->getUser();   // 当前认证用户 = A
-        // $subject = 条目 123，其所属用户 = B
-
-        return $user === $subject->getUser();  // A === B ? → false
-    }
-
-↓ Symfony Security 组件判定 ACCESS_DENIED
-  → 抛出 AccessDeniedHttpException (HTTP 403)
-
-步骤 3: 异常转换（关键伪装步骤）
-─────────────────────────────────────────
-[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php#L20-L28]
-    public function onKernelException(ExceptionEvent $event): void
-    {
-        $exception = $event->getThrowable();  // AccessDeniedHttpException
-
-        if ($exception instanceof AccessDeniedHttpException) {
-            // 替换异常对象
-            $notFoundException = new NotFoundHttpException('', $exception);
-            $event->setThrowable($notFoundException);
-        }
-    }
-
-↓ 最终返回给客户端:
-  HTTP/1.1 404 Not Found
+GET /api/entries/123.json   （admin 用户访问属于 bob 的条目 123）
+    │
+    ▼
+1. ParamConverter 按 ID 加载 Entry（不过滤 user_id）
+   → SELECT * FROM entry WHERE id = 123
+   → 找到记录，注入 $entry 对象（虽然属于 bob）
+    │
+    ▼
+2. #[IsGranted('VIEW', subject: 'entry')] 触发 EntryVoter
+   → admin === bob ? → false → ACCESS_DENIED
+    │
+    ▼
+3. 抛出 AccessDeniedHttpException (HTTP 403)
+    │
+    ▼
+4. AccessDeniedToNotFoundSubscriber 捕获异常
+   → 替换为 NotFoundHttpException   ★ 403 被改写为 404
+    │
+    ▼
+5. 返回 404 Not Found
 ```
+
+#### 典型代码：标签规则 Web 越权删除
+
+[src/Controller/ConfigController.php#L483-L485](src/Controller/ConfigController.php#L483-L485)
+
+```php
+#[Route(path: '/tagging-rule/delete/{taggingRule}', name: 'delete_tagging_rule', methods: ['POST'])]
+#[IsGranted('DELETE', subject: 'taggingRule')]   // ★ 触发 TaggingRuleVoter
+public function deleteTaggingRuleAction(Request $request, TaggingRule $taggingRule)
+```
+
+**TaggingRuleVoter 所有权校验**：[src/Security/Voter/TaggingRuleVoter.php#L28-L42](src/Security/Voter/TaggingRuleVoter.php#L28-L42)
+
+```php
+protected function voteOnAttribute(string $attribute, $subject, TokenInterface $token): bool
+{
+    \assert($subject instanceof TaggingRule);
+    $user = $token->getUser();
+    if (!$user instanceof User) {
+        return false;
+    }
+    return match ($attribute) {
+        self::EDIT, self::DELETE => $subject->getConfig()->getUser() === $user,  // ★ 规则所属用户 !== 当前用户 → false
+        default => false,
+    };
+}
+```
+
+**执行时序**：
+
+```
+POST /tagging-rule/delete/1   （bob 用户删除属于 admin 的标签规则 1）
+    │
+    ▼
+1. ParamConverter 按 ID 加载 TaggingRule（不过滤 user_id）
+   → 找到记录，注入 $taggingRule 对象（虽然属于 admin）
+    │
+    ▼
+2. #[IsGranted('DELETE', subject: 'taggingRule')] 触发 TaggingRuleVoter
+   → rule.config.user === bob ? → false → ACCESS_DENIED
+    │
+    ▼
+3. 抛出 AccessDeniedHttpException (HTTP 403)
+    │
+    ▼
+4. AccessDeniedToNotFoundSubscriber 捕获异常
+   → 替换为 NotFoundHttpException   ★ 403 被改写为 404
+    │
+    ▼
+5. 返回 404 Not Found
+```
+
+#### 功能测试证据
+
+**证据 B1：API 越权读取他人条目 → 404**
+
+[tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113)
+
+```php
+public function testGetOneEntryWrongUser(): void
+{
+    $entry = $this->client->getContainer()
+        ->get(EntityManagerInterface::class)
+        ->getRepository(Entry::class)
+        ->findOneBy(['user' => $this->getUserId('bob'), 'isArchived' => false]);
+
+    $this->client->request('GET', '/api/entries/' . $entry->getId() . '.json');
+
+    // 条目存在，Voter 拒绝后异常转换 → 404
+    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
+}
+```
+
+**证据 B2：Web 越权读取他人条目 → 404**
+
+[tests/functional/Controller/EntryControllerTest.php#L784-L797](tests/functional/Controller/EntryControllerTest.php#L784-L797)
+
+```php
+public function testViewOtherUserEntry(): void
+{
+    $this->logInAs('admin');
+    $client = $this->getTestClient();
+    $content = $client->getContainer()
+        ->get(EntityManagerInterface::class)
+        ->getRepository(Entry::class)
+        ->findOneByUsernameAndNotArchived('bob');
+
+    $client->request('GET', '/view/' . $content->getId());
+
+    // 条目存在，Voter 拒绝后异常转换 → 404
+    $this->assertSame(404, $client->getResponse()->getStatusCode());
+}
+```
+
+**证据 B3：API 越权获取他人条目标注 → 404**
+
+[tests/functional/Controller/AnnotationControllerTest.php#L69-L86](tests/functional/Controller/AnnotationControllerTest.php#L69-L86)
+
+```php
+public function testGetAnnotationsFromAnOtherUser($prefixUrl): void
+{
+    $otherUser = $em->getRepository(User::class)->findOneByUserName('bob');
+    $entry = $em->getRepository(Entry::class)
+        ->findByUrlAndUserId('http://0.0.0.0/entry3', $otherUser->getId());
+
+    $this->client->request('GET', $prefixUrl . '/' . $entry->getId() . '.json');
+
+    // 标注的宿主条目属于 bob，EntryVoter 拒绝后异常转换 → 404
+    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
+}
+```
+
+**证据 B4：API 越权编辑他人标注 → 404**
+
+[tests/functional/Controller/AnnotationControllerTest.php#L271-L291](tests/functional/Controller/AnnotationControllerTest.php#L271-L291)
+
+```php
+public function testEditAnnotationFromAnOtherUser($prefixUrl): void
+{
+    $otherUser = $em->getRepository(User::class)->findOneByUserName('bob');
+    $entry = $em->getRepository(Entry::class)
+        ->findByUrlAndUserId('http://0.0.0.0/entry3', $otherUser->getId());
+    $annotation = $em->getRepository(Annotation::class)
+        ->findLastAnnotationByUserId($entry->getId(), $otherUser->getId());
+
+    $this->client->request('PUT', $prefixUrl . '/' . $annotation->getId() . '.json',
+        [], [], $headers, $content);
+
+    // 标注的宿主条目属于 bob，EntryVoter 拒绝后异常转换 → 404
+    $this->assertSame(404, $this->client->getResponse()->getStatusCode());
+}
+```
+
+**证据 B5：Web 越权删除他人标签规则 → 404**
+
+[tests/functional/Controller/ConfigControllerTest.php#L577-L591](tests/functional/Controller/ConfigControllerTest.php#L577-L591)
+
+```php
+public function testDeletingTaggingRuleFromAnOtherUser(): void
+{
+    $this->logInAs('bob');
+    $client = $this->getTestClient();
+    $rule = $client->getContainer()->get(EntityManagerInterface::class)
+        ->getRepository(TaggingRule::class)->findAll()[0];
+
+    $crawler = $client->request('POST', '/tagging-rule/delete/' . $rule->getId());
+
+    // 规则存在，TaggingRuleVoter 拒绝后异常转换 → 404
+    $this->assertSame(404, $client->getResponse()->getStatusCode());
+}
+```
+
+**证据 B6：Web 越权编辑他人标签规则 → 404**
+
+[tests/functional/Controller/ConfigControllerTest.php#L593-L607](tests/functional/Controller/ConfigControllerTest.php#L593-L607)
+
+```php
+public function testEditingTaggingRuleFromAnOtherUser(): void
+{
+    $this->logInAs('bob');
+    $client = $this->getTestClient();
+    $rule = $client->getContainer()->get(EntityManagerInterface::class)
+        ->getRepository(TaggingRule::class)->findAll()[0];
+
+    $crawler = $client->request('GET', '/tagging-rule/edit/' . $rule->getId());
+
+    // 规则存在，TaggingRuleVoter 拒绝后异常转换 → 404
+    $this->assertSame(404, $client->getResponse()->getStatusCode());
+}
+```
+
+---
+
+### 3.3 两条路径的对比
+
+```
+路径 A（标签 API）                           路径 B（条目/标注/标签规则）
+─────────────────────                        ────────────────────────────
+请求到达                                     请求到达
+    │                                            │
+    ▼                                            ▼
+控制器调用 Repository 方法                    ParamConverter 按 ID 加载实体
+    │                                            │
+    ▼                                            ▼
+Repository 按 user_id 过滤查询                #[IsGranted] 触发 Voter
+    │                                            │
+    ▼                                            ▼
+查询结果为空                                  Voter 返回 ACCESS_DENIED
+    │                                            │
+    ▼                                            ▼
+控制器直接抛                                  抛出 AccessDeniedHttpException
+NotFoundHttpException                         (HTTP 403)
+    │                                            │
+    ▼                                            ▼
+返回 404                                      AccessDeniedToNotFoundSubscriber
+                                              将 403 改写为 NotFoundHttpException
+                                                  │
+                                                  ▼
+                                              返回 404
+
+特点：                                        特点：
+• 404 是真实的：资源在用户作用域              • 404 是伪装的：资源存在但被
+  内确实不存在                                  Voter 拒绝后改写
+• 从未触发 Voter                              • 经过了 Voter 的所有权校验
+• 从未抛出 AccessDeniedHttpException          • 经过了全局异常转换
+• 安全性由数据层查询保证                      • 安全性由 Voter + 异常转换保证
+```
+
+---
 
 ### 3.4 设计意图：防止资源存在性探测（防枚举攻击）
 
-这种 403→404 的转换是一种经典安全策略，目的是**不向攻击者泄露资源是否存在**：
+两条路径虽然机制不同，但最终效果一致——**不向攻击者泄露资源是否存在**：
 
-| 场景 | 无转换时响应 | 有转换时响应 |
-|------|-------------|-------------|
-| 条目 ID 不存在（数据库中无此记录） | 404 Not Found | 404 Not Found |
-| 条目 ID 存在但不属于当前用户 | 403 Forbidden | **404 Not Found** |
-| 条目 ID 存在且属于当前用户 | 200 OK | 200 OK |
+| 场景 | 路径 A 响应 | 路径 B 响应（无转换） | 路径 B 响应（有转换） |
+|------|-----------|--------------------|--------------------|
+| 资源 ID 不存在 | 404 | 404 | 404 |
+| 资源存在但不属于当前用户 | 404 | **403** (泄露存在性) | **404** |
+| 资源存在且属于当前用户 | 200 | 200 | 200 |
 
-**攻击者视角**：无论目标 ID 是否真实存在，只要无权访问就统一返回 404，无法通过响应码差异来枚举出有效的条目 ID。
+**攻击者视角**：无论走哪条路径，只要无权访问就统一返回 404，无法通过响应码差异来判断某个 ID 是否真实存在。
 
-### 3.5 ParamConverter 加载他人数据是否构成信息泄露？
+### 3.5 ParamConverter 加载他人数据是否构成信息泄露？（仅限路径 B）
 
 **答案：不构成。** 原因如下：
 
-1. **ParamConverter 仅在内存中加载**：Doctrine 查询出的 Entry 对象仅存在于 PHP 内存中，未序列化输出
-2. **#[IsGranted] 在控制器方法执行前触发**：SensioFrameworkExtraBundle 的 SecurityListener 在控制器调用前执行权限检查，若失败则控制器方法**根本不会执行**，$entry 对象不会被使用
+1. **ParamConverter 仅在内存中加载**：Doctrine 查询出的实体对象仅存在于 PHP 内存中，未序列化输出
+2. **#[IsGranted] 在控制器方法执行前触发**：SensioFrameworkExtraBundle 的 SecurityListener 在控制器调用前执行权限检查，若失败则控制器方法**根本不会执行**
 3. **异常转换在响应前执行**：AccessDenied→NotFound 转换发生在 KernelEvents::EXCEPTION，此时响应体尚未构建
 
 执行顺序由 Symfony HTTP Kernel 保证：
@@ -534,7 +719,7 @@ class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
 ```
 kernel.request
   → RouterListener (匹配路由)
-  → ParamConverterListener (加载 Entry 到 $request->attributes)
+  → ParamConverterListener (加载实体到 $request->attributes)
   → SecurityListener (#[IsGranted] 检查 → 失败则抛异常)
   → 控制器方法调用 (被跳过，因为异常已抛出)
 
