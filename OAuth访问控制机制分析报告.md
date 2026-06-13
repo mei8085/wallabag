@@ -65,7 +65,7 @@ Wallabag 采用 **Symfony Security 组件 + FOSOAuthServerBundle** 实现 OAuth2
 
 用户首先需要登录 Web 界面，在开发者页面创建一个 API Client（即一个"应用"）。
 
-**控制器代码**：[src/Controller/Api/DeveloperController.php#L39-L66](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Controller/Api/DeveloperController.php#L39-L66)
+**控制器代码**：[src/Controller/Api/DeveloperController.php#L39-L66](src/Controller/Api/DeveloperController.php#L39-L66)
 
 ```php
 #[Route(path: '/developer/client/create', name: 'developer_create_client', methods: ['GET', 'POST'])]
@@ -83,7 +83,7 @@ public function createClientAction(Request $request, EntityManagerInterface $ent
 }
 ```
 
-**Client 实体结构**：[src/Entity/Api/Client.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/Client.php)
+**Client 实体结构**：[src/Entity/Api/Client.php](src/Entity/Api/Client.php)
 
 ```php
 #[ORM\Entity]
@@ -112,7 +112,7 @@ class Client extends BaseClient
 
 调用方通过 FOSOAuthServerBundle 提供的标准 OAuth2 端点 `/oauth/v2/token` 申请令牌。
 
-**官方文档说明**：[doc/content/developer/api/oauth.md](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/doc/content/developer/api/oauth.md)
+**官方文档说明**：[doc/content/developer/api/oauth.md](doc/content/developer/api/oauth.md)
 
 ```bash
 # 申请令牌（password 授权模式）
@@ -124,7 +124,7 @@ http POST http://localhost:8000/oauth/v2/token \
     password=wallabag
 ```
 
-**功能测试验证**：[tests/functional/Controller/Api/DeveloperControllerTest.php#L39-L59](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/DeveloperControllerTest.php#L39-L59)
+**功能测试验证**：[tests/functional/Controller/Api/DeveloperControllerTest.php#L39-L59](tests/functional/Controller/Api/DeveloperControllerTest.php#L39-L59)
 
 ```php
 public function testCreateToken(): void
@@ -145,7 +145,7 @@ public function testCreateToken(): void
 }
 ```
 
-**FOSOAuthServerBundle 内部令牌颁发流程**（由第三方包实现，配置见 [app/config/config.yml#L203-L213](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/app/config/config.yml#L203-L213)）：
+**FOSOAuthServerBundle 内部令牌颁发流程**（由第三方包实现，配置见 [app/config/config.yml#L203-L213](app/config/config.yml#L203-L213)）：
 
 ```
 POST /oauth/v2/token
@@ -173,7 +173,7 @@ POST /oauth/v2/token
 
 ### 2.3 第三步：AccessToken 与用户的绑定关系
 
-**AccessToken 实体**：[src/Entity/Api/AccessToken.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/AccessToken.php)
+**AccessToken 实体**：[src/Entity/Api/AccessToken.php](src/Entity/Api/AccessToken.php)
 
 ```php
 #[ORM\Table('oauth2_access_tokens')]
@@ -194,14 +194,14 @@ class AccessToken extends BaseAccessToken
 
 | 实体类 | 表名 | 绑定字段 |
 |--------|------|---------|
-| [src/Entity/Api/AccessToken.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/AccessToken.php) | `oauth2_access_tokens` | `user_id` |
-| [src/Entity/Api/RefreshToken.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/RefreshToken.php) | `oauth2_refresh_tokens` | `user_id` |
-| [src/Entity/Api/AuthCode.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/AuthCode.php) | `oauth2_auth_codes` | `user_id` |
-| [src/Entity/Api/Client.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/Client.php) | `oauth2_clients` | `user_id` |
+| [src/Entity/Api/AccessToken.php](src/Entity/Api/AccessToken.php) | `oauth2_access_tokens` | `user_id` |
+| [src/Entity/Api/RefreshToken.php](src/Entity/Api/RefreshToken.php) | `oauth2_refresh_tokens` | `user_id` |
+| [src/Entity/Api/AuthCode.php](src/Entity/Api/AuthCode.php) | `oauth2_auth_codes` | `user_id` |
+| [src/Entity/Api/Client.php](src/Entity/Api/Client.php) | `oauth2_clients` | `user_id` |
 
 ### 2.4 第四步：请求鉴权时如何从 Token 还原用户
 
-**防火墙配置**：[app/config/security.yml#L29-L34](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/app/config/security.yml#L29-L34)
+**防火墙配置**：[app/config/security.yml#L29-L34](app/config/security.yml#L29-L34)
 
 ```yaml
 firewalls:
@@ -242,7 +242,7 @@ HTTP 请求到达 /api/entries/123
 
 ### 2.5 Scope 机制分析（未实际使用）
 
-数据库层面存在 scope 字段（见 [migrations/Version20160401000000.php#L38-L46](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/migrations/Version20160401000000.php#L38-L46)）：
+数据库层面存在 scope 字段（见 [migrations/Version20160401000000.php#L38-L46](migrations/Version20160401000000.php#L38-L46)）：
 
 ```sql
 CREATE TABLE oauth2_access_tokens (
@@ -270,7 +270,7 @@ CREATE TABLE oauth2_access_tokens (
 
 #### 证据 1：API 越权读取他人条目
 
-**功能测试**：[tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113)
+**功能测试**：[tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113)
 
 ```php
 public function testGetOneEntryWrongUser(): void
@@ -291,7 +291,7 @@ public function testGetOneEntryWrongUser(): void
 
 #### 证据 2：Web 界面越权读取他人条目
 
-**功能测试**：[tests/functional/Controller/EntryControllerTest.php#L784-L797](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/EntryControllerTest.php#L784-L797)
+**功能测试**：[tests/functional/Controller/EntryControllerTest.php#L784-L797](tests/functional/Controller/EntryControllerTest.php#L784-L797)
 
 ```php
 public function testViewOtherUserEntry(): void
@@ -315,7 +315,7 @@ public function testViewOtherUserEntry(): void
 
 #### 证据 3：API 越权删除他人标签
 
-**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81)
+**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81)
 
 ```php
 public function testDeleteOtherUserTag(): void
@@ -334,7 +334,7 @@ public function testDeleteOtherUserTag(): void
 
 #### 证据 4：API 越权通过标签名删除他人标签
 
-**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147)
+**功能测试**：[tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147)
 
 ```php
 public function testDeleteTagByLabelOtherUser(): void
@@ -349,7 +349,7 @@ public function testDeleteTagByLabelOtherUser(): void
 
 #### 证据 5：API 越权获取他人条目标注
 
-**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L69-L86](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/AnnotationControllerTest.php#L69-L86)
+**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L69-L86](tests/functional/Controller/AnnotationControllerTest.php#L69-L86)
 
 ```php
 public function testGetAnnotationsFromAnOtherUser($prefixUrl): void
@@ -369,7 +369,7 @@ public function testGetAnnotationsFromAnOtherUser($prefixUrl): void
 
 #### 证据 6：API 越权编辑他人标注
 
-**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L271-L291](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/AnnotationControllerTest.php#L271-L291)
+**功能测试**：[tests/functional/Controller/AnnotationControllerTest.php#L271-L291](tests/functional/Controller/AnnotationControllerTest.php#L271-L291)
 
 ```php
 public function testEditAnnotationFromAnOtherUser($prefixUrl): void
@@ -392,7 +392,7 @@ public function testEditAnnotationFromAnOtherUser($prefixUrl): void
 
 #### 证据 7：Web 越权删除他人标签规则
 
-**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L577-L591](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/ConfigControllerTest.php#L577-L591)
+**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L577-L591](tests/functional/Controller/ConfigControllerTest.php#L577-L591)
 
 ```php
 public function testDeletingTaggingRuleFromAnOtherUser(): void
@@ -414,7 +414,7 @@ public function testDeletingTaggingRuleFromAnOtherUser(): void
 
 #### 证据 8：Web 越权编辑他人标签规则
 
-**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L593-L607](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/ConfigControllerTest.php#L593-L607)
+**功能测试**：[tests/functional/Controller/ConfigControllerTest.php#L593-L607](tests/functional/Controller/ConfigControllerTest.php#L593-L607)
 
 ```php
 public function testEditingTaggingRuleFromAnOtherUser(): void
@@ -436,7 +436,7 @@ public function testEditingTaggingRuleFromAnOtherUser(): void
 
 ### 3.2 核心机制：AccessDeniedToNotFoundSubscriber
 
-**异常转换事件订阅器**：[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
+**异常转换事件订阅器**：[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
 
 ```php
 class AccessDeniedToNotFoundSubscriber implements EventSubscriberInterface
@@ -551,7 +551,7 @@ Wallabag 使用 Symfony Voter 实现基于属性的访问控制（ABAC），这�
 
 ### 4.1 MainVoter：集合级操作权限判断
 
-文件位置：[src/Security/Voter/MainVoter.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Security/Voter/MainVoter.php)
+文件位置：[src/Security/Voter/MainVoter.php](src/Security/Voter/MainVoter.php)
 
 **支持的权限属性（无 Subject）**：
 
@@ -567,7 +567,7 @@ public const CREATE_TAGS = 'CREATE_TAGS';
 public const DELETE_TAGS = 'DELETE_TAGS';
 ```
 
-**投票逻辑（[src/Security/Voter/MainVoter.php#L42-L48](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Security/Voter/MainVoter.php#L42-L48)）**：
+**投票逻辑（[src/Security/Voter/MainVoter.php#L42-L48](src/Security/Voter/MainVoter.php#L42-L48)）**：
 
 ```php
 protected function voteOnAttribute(string $attribute, $subject, TokenInterface $token): bool
@@ -588,7 +588,7 @@ protected function voteOnAttribute(string $attribute, $subject, TokenInterface $
 
 ### 4.2 EntryVoter：单条目级操作权限判断
 
-文件位置：[src/Security/Voter/EntryVoter.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Security/Voter/EntryVoter.php)
+文件位置：[src/Security/Voter/EntryVoter.php](src/Security/Voter/EntryVoter.php)
 
 **支持的权限属性（需 Subject = Entry 实例）**：
 
@@ -609,7 +609,7 @@ public const TAG = 'TAG';
 public const UNTAG = 'UNTAG';
 ```
 
-**核心投票逻辑（[src/Security/Voter/EntryVoter.php#L40-L54](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Security/Voter/EntryVoter.php#L40-L54)）**：
+**核心投票逻辑（[src/Security/Voter/EntryVoter.php#L40-L54](src/Security/Voter/EntryVoter.php#L40-L54)）**：
 
 ```php
 protected function voteOnAttribute(string $attribute, $subject, TokenInterface $token): bool
@@ -639,7 +639,7 @@ protected function voteOnAttribute(string $attribute, $subject, TokenInterface $
 - 若不匹配（即越权访问他人条目），返回 `false`，Voter 投出 `ACCESS_DENIED`
 - 随后 AccessDeniedToNotFoundSubscriber 将其伪装成 404
 
-**单元测试验证**（[tests/unit/Security/Voter/EntryVoterTest.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/unit/Security/Voter/EntryVoterTest.php)）：
+**单元测试验证**（[tests/unit/Security/Voter/EntryVoterTest.php](tests/unit/Security/Voter/EntryVoterTest.php)）：
 
 ```php
 // 非条目的所属用户访问 → 返回 ACCESS_DENIED
@@ -655,7 +655,7 @@ public function testVoteReturnsDeniedForNonEntryUserView(): void
 
 ## 五、控制器层：#[IsGranted] 注解的应用
 
-文件位置：[src/Controller/Api/EntryRestController.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Controller/Api/EntryRestController.php)
+文件位置：[src/Controller/Api/EntryRestController.php](src/Controller/Api/EntryRestController.php)
 
 ### 5.1 集合级操作（无 Subject）
 
@@ -687,7 +687,7 @@ public function testVoteReturnsDeniedForNonEntryUserView(): void
 
 除了注解检查外，部分方法在代码逻辑中进行二次检查，例如批量操作：
 
-[src/Controller/Api/EntryRestController.php#L499](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Controller/Api/EntryRestController.php#L499)
+[src/Controller/Api/EntryRestController.php#L499](src/Controller/Api/EntryRestController.php#L499)
 ```php
 if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)) {
     // 执行删除操作
@@ -702,13 +702,13 @@ if (false !== $entry && $this->authorizationChecker->isGranted('DELETE', $entry)
 
 ## 六、Repository 数据层：强制用户过滤
 
-文件位置：[src/Repository/EntryRepository.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Repository/EntryRepository.php)
+文件位置：[src/Repository/EntryRepository.php](src/Repository/EntryRepository.php)
 
 这是**最后一道防线**，即使上层 Voter 被绕过，Repository 层也会强制只返回当前用户的数据。
 
 ### 6.1 私有基础查询构造器
 
-[src/Repository/EntryRepository.php#L753-L757](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Repository/EntryRepository.php#L753-L757)
+[src/Repository/EntryRepository.php#L753-L757](src/Repository/EntryRepository.php#L753-L757)
 
 ```php
 private function getQueryBuilderByUser($userId)
@@ -722,7 +722,7 @@ private function getQueryBuilderByUser($userId)
 
 ### 6.2 典型查询示例
 
-**控制器调用方式**（[src/Controller/Api/EntryRestController.php#L333-L334](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Controller/Api/EntryRestController.php#L333-L334)）：
+**控制器调用方式**（[src/Controller/Api/EntryRestController.php#L333-L334](src/Controller/Api/EntryRestController.php#L333-L334)）：
 ```php
 $pager = $entryRepository->findEntries(
     $this->getUser()->getId(),  // 传入当前认证用户的 ID
@@ -740,11 +740,11 @@ $pager = $entryRepository->findEntries(
 
 | 层级 | 位置 | 否决条件 | 效果 |
 |------|------|---------|------|
-| **第1层：防火墙** | [app/config/security.yml#L29-L34](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/app/config/security.yml#L29-L34) | 无有效 OAuth Bearer Token | 401 Unauthorized |
-| **第2层：Voter 所有权检查** | `#[IsGranted]` + [src/Security/Voter/EntryVoter.php#L51](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Security/Voter/EntryVoter.php#L51) | 当前用户 ≠ 条目所属用户 | 抛出 AccessDeniedHttpException (内部 403) |
-| **第2.5层：异常伪装** | [src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php#L20-L28](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php#L20-L28) | 捕获 AccessDeniedHttpException | 替换为 NotFoundHttpException → 404 Not Found |
-| **第3层：运行时二次检查** | [src/Controller/Api/EntryRestController.php#L499](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Controller/Api/EntryRestController.php#L499) | 批量操作中逐条检查所有权 | 跳过未授权条目 |
-| **第4层：Repository 强制过滤** | [src/Repository/EntryRepository.php#L753-L757](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Repository/EntryRepository.php#L753-L757) | 所有查询强制 `WHERE user_id = ?` | 空结果集 / 仅返回本人数据 |
+| **第1层：防火墙** | [app/config/security.yml#L29-L34](app/config/security.yml#L29-L34) | 无有效 OAuth Bearer Token | 401 Unauthorized |
+| **第2层：Voter 所有权检查** | `#[IsGranted]` + [src/Security/Voter/EntryVoter.php#L51](src/Security/Voter/EntryVoter.php#L51) | 当前用户 ≠ 条目所属用户 | 抛出 AccessDeniedHttpException (内部 403) |
+| **第2.5层：异常伪装** | [src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php#L20-L28](src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php#L20-L28) | 捕获 AccessDeniedHttpException | 替换为 NotFoundHttpException → 404 Not Found |
+| **第3层：运行时二次检查** | [src/Controller/Api/EntryRestController.php#L499](src/Controller/Api/EntryRestController.php#L499) | 批量操作中逐条检查所有权 | 跳过未授权条目 |
+| **第4层：Repository 强制过滤** | [src/Repository/EntryRepository.php#L753-L757](src/Repository/EntryRepository.php#L753-L757) | 所有查询强制 `WHERE user_id = ?` | 空结果集 / 仅返回本人数据 |
 
 ---
 
@@ -774,7 +774,7 @@ $pager = $entryRepository->findEntries(
 
 **绑定发生在两个层面**：
 
-1. **令牌颁发时**：调用方通过 `POST /oauth/v2/token` 提交 `username + password`，FOSOAuthServerBundle 验证用户凭证后，在 `oauth2_access_tokens` 表中创建记录时将 `user_id` 字段设置为对应用户的 ID（见 [src/Entity/Api/AccessToken.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Entity/Api/AccessToken.php)）
+1. **令牌颁发时**：调用方通过 `POST /oauth/v2/token` 提交 `username + password`，FOSOAuthServerBundle 验证用户凭证后，在 `oauth2_access_tokens` 表中创建记录时将 `user_id` 字段设置为对应用户的 ID（见 [src/Entity/Api/AccessToken.php](src/Entity/Api/AccessToken.php)）
 
 2. **请求鉴权时**：API 请求携带 `Authorization: Bearer {token}`，FOSOAuthServerBundle 的防火墙监听器查询 `oauth2_access_tokens` 表，通过 token 找到 `user_id`，再通过该外键加载 User 对象并注入 Symfony Security Token 中。后续 `$this->getUser()` 即返回此用户
 
@@ -782,7 +782,7 @@ $pager = $entryRepository->findEntries(
 
 ### Q2: 越权访问条目为何表现为 404 而非 403？
 
-**核心机制**：[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
+**核心机制**：[src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php](src/Event/Subscriber/AccessDeniedToNotFoundSubscriber.php)
 
 **执行流程**：
 
@@ -798,11 +798,11 @@ $pager = $entryRepository->findEntries(
 
 | # | 测试用例 | 操作 | 所属用户 | 认证用户 | 返回码 |
 |---|---------|------|---------|---------|-------|
-| 1 | [tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113) | GET 条目 | bob | admin | 404 |
-| 2 | [tests/functional/Controller/EntryControllerTest.php#L784-L797](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/EntryControllerTest.php#L784-L797) | GET 条目(Web) | bob | admin | 404 |
-| 3 | [tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81) | DELETE 标签 | bob | admin | 404 |
-| 4 | [tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147) | DELETE 标签(按名) | bob | admin | 404 |
-| 5 | [tests/functional/Controller/AnnotationControllerTest.php#L69-L86](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/AnnotationControllerTest.php#L69-L86) | GET 标注 | bob | admin | 404 |
-| 6 | [tests/functional/Controller/AnnotationControllerTest.php#L271-L291](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/AnnotationControllerTest.php#L271-L291) | PUT 标注 | bob | admin | 404 |
-| 7 | [tests/functional/Controller/ConfigControllerTest.php#L577-L591](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/ConfigControllerTest.php#L577-L591) | DELETE 标签规则 | admin | bob | 404 |
-| 8 | [tests/functional/Controller/ConfigControllerTest.php#L593-L607](file:///d:/fz/0601-1/solo-dogfeeding/code/43-wallabag/tests/functional/Controller/ConfigControllerTest.php#L593-L607) | GET 规则编辑页 | admin | bob | 404 |
+| 1 | [tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113](tests/functional/Controller/Api/EntryRestControllerTest.php#L99-L113) | GET 条目 | bob | admin | 404 |
+| 2 | [tests/functional/Controller/EntryControllerTest.php#L784-L797](tests/functional/Controller/EntryControllerTest.php#L784-L797) | GET 条目(Web) | bob | admin | 404 |
+| 3 | [tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81](tests/functional/Controller/Api/TagRestControllerTest.php#L73-L81) | DELETE 标签 | bob | admin | 404 |
+| 4 | [tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147](tests/functional/Controller/Api/TagRestControllerTest.php#L142-L147) | DELETE 标签(按名) | bob | admin | 404 |
+| 5 | [tests/functional/Controller/AnnotationControllerTest.php#L69-L86](tests/functional/Controller/AnnotationControllerTest.php#L69-L86) | GET 标注 | bob | admin | 404 |
+| 6 | [tests/functional/Controller/AnnotationControllerTest.php#L271-L291](tests/functional/Controller/AnnotationControllerTest.php#L271-L291) | PUT 标注 | bob | admin | 404 |
+| 7 | [tests/functional/Controller/ConfigControllerTest.php#L577-L591](tests/functional/Controller/ConfigControllerTest.php#L577-L591) | DELETE 标签规则 | admin | bob | 404 |
+| 8 | [tests/functional/Controller/ConfigControllerTest.php#L593-L607](tests/functional/Controller/ConfigControllerTest.php#L593-L607) | GET 规则编辑页 | admin | bob | 404 |
